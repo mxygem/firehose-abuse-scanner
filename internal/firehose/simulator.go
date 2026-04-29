@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/mxygem/firehose-abuse-scanner/internal/models"
@@ -16,6 +18,7 @@ const (
 	DefaultSimulatorConcurrency = 1
 	DefaultEventsPerSecond      = 1000
 	DefaultBurstProbability     = 0.3
+	MaxChannelBuffer            = 10000
 )
 
 // Simulator generates realistic-looking AT protocol events locally.
@@ -85,57 +88,70 @@ func (s *Simulator) Name() string { return "local-simulator" }
 
 func (s *Simulator) Subscribe(ctx context.Context) (<-chan models.FirehoseEvent, error) {
 	l := slog.Default()
-	ch := make(chan models.FirehoseEvent, s.EventsPerSecond) // buffer = 1 second of events
+	ch := make(chan models.FirehoseEvent, min(s.EventsPerSecond, MaxChannelBuffer))
 
 	l.Info("subscribing to firehose", "events_per_second", s.EventsPerSecond, "burst_duration", s.BurstDuration, "burst_multiplier", s.BurstMultiplier, "simulator_concurrency", s.SimulatorConcurrency)
-	burstDuration := time.Duration(s.BurstDuration) * time.Second
 
-	go func() {
-		defer close(ch)
+	var wg sync.WaitGroup
+	for i := 0; i < s.SimulatorConcurrency; i++ {
+		wg.Add(1)
+		go func(runnerID int) {
+			defer wg.Done()
+			ticker := time.NewTicker(time.Second / time.Duration(s.EventsPerSecond))
+			defer ticker.Stop()
 
-		ticker := time.NewTicker(time.Second / time.Duration(s.EventsPerSecond))
-		defer ticker.Stop()
+			burstDuration := time.Duration(s.BurstDuration) * time.Second
+			burstTicker := time.NewTicker(burstDuration)
+			defer burstTicker.Stop()
 
-		burstTicker := time.NewTicker(burstDuration)
-		defer burstTicker.Stop()
+			inBurst := false
+			burstEnd := time.Time{}
 
-		inBurst := false
-		burstEnd := time.Time{}
+			for {
+				select {
+				case <-ctx.Done():
+					close(ch)
+					wg.Wait()
+					return
+				case <-burstTicker.C:
+					// randomly trigger a burst
+					if rand.Float64() < s.BurstProbability {
+						l.Info("triggering burst", "runner", runnerID)
+						inBurst = true
+						burstEnd = time.Now().Add(burstDuration)
+					}
 
-		for {
-			select {
-			case <-ctx.Done():
-				return
+				case t := <-ticker.C:
+					if inBurst && time.Now().After(burstEnd) {
+						l.Info("burst ended", "runner", runnerID)
+						inBurst = false
+					}
 
-			case <-burstTicker.C:
-				// randomly trigger a burst ~30% of the time
-				if rand.Float64() < 0.3 {
-					l.Info("triggering burst")
-					inBurst = true
-					burstEnd = time.Now().Add(2 * time.Second)
-				}
+					count := 3
+					if inBurst {
+						count = int(s.BurstMultiplier)
+						if count < 1 {
+							count = 1
+						}
+					}
 
-			case t := <-ticker.C:
-				if inBurst && time.Now().After(burstEnd) {
-					l.Info("burst ended")
-					inBurst = false
-				}
-
-				count := 1
-				if inBurst {
-					count = int(s.BurstMultiplier)
-				}
-
-				for range count {
-					evt := generateEvent(t)
-					select {
-					case ch <- evt:
-					case <-ctx.Done():
-						return
+					for j := 0; j < count; j++ {
+						evt := generateEvent(t)
+						select {
+						case ch <- evt:
+						case <-ctx.Done():
+							return
+						}
 					}
 				}
 			}
-		}
+		}(i)
+	}
+
+	// Wait for all runners to finish before closing the channel (handled in defer)
+	go func() {
+		wg.Wait()
+		close(ch)
 	}()
 
 	return ch, nil
@@ -175,14 +191,14 @@ var (
 	}
 )
 
-var counter int64
+var counter atomic.Int64
 
 func generateEvent(t time.Time) models.FirehoseEvent {
-	counter++
+	id := counter.Add(1)
 	kind := eventKinds[rand.IntN(len(eventKinds))]
 
 	evt := models.FirehoseEvent{
-		ID:         fmt.Sprintf("evt-%d", counter),
+		ID:         fmt.Sprintf("evt-%d", id),
 		DID:        fmt.Sprintf("did:plc:%016x", rand.Int64N(16)),
 		Kind:       kind,
 		CreatedAt:  t,
