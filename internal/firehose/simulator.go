@@ -1,0 +1,139 @@
+package firehose
+
+import (
+	"context"
+	"fmt"
+	"math/rand/v2"
+	"time"
+
+	"github.com/mxygem/firehose-abuse-scanner/internal/models"
+)
+
+// Simulator generates realistic-looking AT protocol events locally.
+// It mimics the bursty, high-volume nature of the real Bluesky firehose.
+type Simulator struct {
+	// EventsPerSecond controlsThe target throughput.
+	EventsPerSecond int
+	// BurstMultiplier briefly spikes throughput to simulate viral moments.
+	BurstMultiplier float64
+}
+
+func NewSimulator(eventsPerSecond int) *Simulator {
+	return &Simulator{
+		EventsPerSecond: eventsPerSecond,
+		BurstMultiplier: 3.0,
+	}
+}
+
+func (s *Simulator) Name() string { return "local-simulator" }
+
+func (s *Simulator) Subscribe(ctx context.Context) (<-chan models.FirehoseEvent, error) {
+	ch := make(chan models.FirehoseEvent, s.EventsPerSecond) // buffer = 1 second of events
+
+	go func() {
+		defer close(ch)
+
+		ticker := time.NewTicker(time.Second / time.Duration(s.EventsPerSecond))
+		defer ticker.Stop()
+
+		burstTicker := time.NewTicker(10 * time.Second)
+		defer burstTicker.Stop()
+
+		inBurst := false
+		burstEnd := time.Time{}
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+
+			case <-burstTicker.C:
+				// randomly trigger a burst ~30% of the time
+				if rand.Float64() < 0.3 {
+					inBurst = true
+					burstEnd = time.Now().Add(2 * time.Second)
+				}
+
+			case t := <-ticker.C:
+				if inBurst && time.Now().After(burstEnd) {
+					inBurst = false
+				}
+
+				count := 1
+				if inBurst {
+					count = int(s.BurstMultiplier)
+				}
+
+				for range count {
+					evt := generateEvent(t)
+					select {
+					case ch <- evt:
+					case <-ctx.Done():
+						return
+					}
+				}
+			}
+		}
+	}()
+
+	return ch, nil
+}
+
+// synthetic data pools
+
+var (
+	eventKinds = []models.EventKind{
+		models.EventPost, // included three times to weight heavier
+		models.EventPost,
+		models.EventPost,
+		models.EventRepost,
+		models.EventFollow,
+		models.EventProfile,
+	}
+
+	sampleTexts = []string{
+		"Just saw the most amazing sunset 🌅",
+		"Click here for free crypto!! t.co/fakespam",
+		"This is a test post from a bot account",
+		"Really enjoying the AT Protocol ecosystem",
+		"BUY NOW LIMITED OFFER CLICK LINK IN BIO",
+		"Excited about the new Bluesky features",
+		"[SPAM] Earn money fast, DM me",
+		"Good morning everyone on the fediverse!",
+		"Replying to myself repeatedly for engagement",
+		"Genuine human post about my cat 🐈",
+	}
+
+	sampleLinks = []string{
+		"https://bsky.app",
+		"https://legit-site.com/article",
+		"https://spam-link.xyz/free-money",
+		"https://news.ycombinator.com",
+		"https://phishing.example.com/login",
+	}
+)
+
+var counter int64
+
+func generateEvent(t time.Time) models.FirehoseEvent {
+	counter++
+	kind := eventKinds[rand.IntN(len(eventKinds))]
+
+	evt := models.FirehoseEvent{
+		ID:         fmt.Sprintf("evt-%d", counter),
+		DID:        fmt.Sprintf("did:plc:1234567890abcdefghijklmnopqrstuvwxyz"),
+		Kind:       kind,
+		CreatedAt:  t,
+		ReceivedAt: time.Now(),
+	}
+
+	if kind == models.EventPost {
+		evt.Text = sampleTexts[rand.IntN(len(sampleTexts))]
+		// include a link 20% of the time
+		if rand.Float64() < 0.2 {
+			evt.Links = []string{sampleLinks[rand.IntN(len(sampleLinks))]}
+		}
+	}
+
+	return evt
+}

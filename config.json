@@ -1,0 +1,6 @@
+{
+    "worker_count": 1,
+    "channel_buffer": 5,
+    "events_per_second": 10,
+    "backpressure_mode": "block"
+}
