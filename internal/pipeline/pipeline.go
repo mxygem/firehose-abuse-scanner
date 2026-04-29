@@ -55,7 +55,7 @@ func (p *Pipeline) Run(ctx context.Context, src <-chan models.FirehoseEvent) err
 	for {
 		select {
 		case <-ctx.Done():
-			// Stop accepting new events, drain the work queueu, then shut down workers.
+			// Stop accepting new events, drain the work queue, then shut down workers.
 			close(p.work)
 			p.wg.Wait()
 			return ctx.Err()

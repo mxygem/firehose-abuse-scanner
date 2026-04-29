@@ -1,6 +1,9 @@
 {
     "worker_count": 5,
-    "channel_buffer": 1000,
+    "channel_buffer": 10000,
     "events_per_second": 20000,
-    "backpressure_mode": "block"
+    "backpressure_mode": "block",
+    "simulator_concurrency": 2,
+    "burst_multiplier": 3.0,
+    "burst_duration": 10
 }

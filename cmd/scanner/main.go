@@ -33,7 +33,12 @@ func main() {
 	defer cancel()
 
 	// Swap NewSimulator with a real WebSocket client later.
-	client := firehose.NewSimulator(cfg.EventsPerSecond)
+	client := firehose.NewSimulator(
+		firehose.WithEventsPerSecond(cfg.EventsPerSecond),
+		firehose.WithBurstMultiplier(cfg.BurstMultiplier),
+		firehose.WithBurstDuration(cfg.BurstDuration),
+		firehose.WithConcurrency(cfg.SimulatorConcurrency),
+	)
 	l.Info("firehose client ready", "source", client.Name())
 
 	src, err := client.Subscribe(ctx)

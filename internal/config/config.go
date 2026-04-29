@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"strconv"
 	"strings"
@@ -22,7 +23,6 @@ type Config struct {
 	// Pipeline
 	WorkerCount      int
 	ChannelBuffer    int
-	EventsPerSecond  int
 	BackpressureMode BackpressureMode
 
 	// Storage (populated in later release)
@@ -31,9 +31,16 @@ type Config struct {
 
 	// Observability
 	MetricsAddr string
+
+	// Testing/Simulation
+	EventsPerSecond      int
+	BurstMultiplier      float64
+	BurstDuration        int
+	SimulatorConcurrency int
 }
 
 func MustLoad(env string) *Config {
+	l := slog.Default()
 	k := koanf.New(".")
 
 	if err := k.Load(file.Provider("config.json"), json.Parser()); err != nil {
@@ -50,14 +57,18 @@ func MustLoad(env string) *Config {
 	}
 
 	cfg := &Config{
-		WorkerCount:      k.Int("worker_count"),
-		ChannelBuffer:    k.Int("channel_buffer"),
-		EventsPerSecond:  k.Int("events_per_second"),
-		BackpressureMode: BackpressureMode(k.String("backpressure_mode")),
-		PostgresDSN:      k.String("postgres_dsn"),
-		RedisAddr:        k.String("redis_addr"),
-		MetricsAddr:      k.String("metrics_addr"),
+		WorkerCount:          k.Int("worker_count"),
+		ChannelBuffer:        k.Int("channel_buffer"),
+		EventsPerSecond:      k.Int("events_per_second"),
+		BackpressureMode:     BackpressureMode(k.String("backpressure_mode")),
+		PostgresDSN:          k.String("postgres_dsn"),
+		RedisAddr:            k.String("redis_addr"),
+		MetricsAddr:          k.String("metrics_addr"),
+		SimulatorConcurrency: k.Int("simulator_concurrency"),
+		BurstMultiplier:      k.Float64("burst_multiplier"),
+		BurstDuration:        k.Int("burst_duration"),
 	}
+	l.Info("config from files", "config", cfg)
 
 	// Override with environment variables if set
 	if v := os.Getenv("WORKER_COUNT"); v != "" {
@@ -88,6 +99,27 @@ func MustLoad(env string) *Config {
 		}
 		cfg.BackpressureMode = mode
 	}
+	if v := os.Getenv("SIMULATOR_CONCURRENCY"); v != "" {
+		concurrency, err := strconv.Atoi(v)
+		if err != nil {
+			panic(fmt.Errorf("invalid SIMULATOR_CONCURRENCY: %v", err))
+		}
+		cfg.SimulatorConcurrency = concurrency
+	}
+	if v := os.Getenv("BURST_MULTIPLIER"); v != "" {
+		multiplier, err := strconv.ParseFloat(v, 64)
+		if err != nil {
+			panic(fmt.Errorf("invalid BURST_MULTIPLIER: %v", err))
+		}
+		cfg.BurstMultiplier = multiplier
+	}
+	if v := os.Getenv("BURST_DURATION"); v != "" {
+		duration, err := strconv.Atoi(v)
+		if err != nil {
+			panic(fmt.Errorf("invalid BURST_DURATION: %v", err))
+		}
+		cfg.BurstDuration = duration
+	}
 
 	if v := os.Getenv("POSTGRES_DSN"); v != "" {
 		if v == "" {
@@ -109,6 +141,8 @@ func MustLoad(env string) *Config {
 		}
 		cfg.MetricsAddr = v
 	}
+
+	l.Info("config from environment variables", "config", cfg)
 
 	return cfg
 }

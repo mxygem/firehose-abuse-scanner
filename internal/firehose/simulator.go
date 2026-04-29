@@ -3,10 +3,19 @@ package firehose
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"math/rand/v2"
 	"time"
 
 	"github.com/mxygem/firehose-abuse-scanner/internal/models"
+)
+
+const (
+	DefaultBurstMultiplier      = 3.0
+	DefaultBurstDuration        = 10
+	DefaultSimulatorConcurrency = 1
+	DefaultEventsPerSecond      = 1000
+	DefaultBurstProbability     = 0.3
 )
 
 // Simulator generates realistic-looking AT protocol events locally.
@@ -14,21 +23,72 @@ import (
 type Simulator struct {
 	// EventsPerSecond controlsThe target throughput.
 	EventsPerSecond int
+	// SimulatorConcurrency the number of goroutines to run concurrently.
+	SimulatorConcurrency int
 	// BurstMultiplier briefly spikes throughput to simulate viral moments.
 	BurstMultiplier float64
+	// BurstDuration the duration of the burst.
+	BurstDuration int
+	// BurstProbability the probability of a burst occurring.
+	BurstProbability float64
 }
 
-func NewSimulator(eventsPerSecond int) *Simulator {
-	return &Simulator{
-		EventsPerSecond: eventsPerSecond,
-		BurstMultiplier: 3.0,
+func NewSimulator(opts ...SimulatorOption) *Simulator {
+	s := &Simulator{
+		EventsPerSecond:      DefaultEventsPerSecond,
+		SimulatorConcurrency: DefaultSimulatorConcurrency,
+		BurstMultiplier:      DefaultBurstMultiplier,
+		BurstDuration:        DefaultBurstDuration,
+		BurstProbability:     DefaultBurstProbability,
+	}
+
+	for _, opt := range opts {
+		opt(s)
+	}
+
+	return s
+}
+
+type SimulatorOption func(*Simulator)
+
+func WithConcurrency(concurrency int) SimulatorOption {
+	return func(s *Simulator) {
+		s.SimulatorConcurrency = concurrency
+	}
+}
+
+func WithBurstMultiplier(multiplier float64) SimulatorOption {
+	return func(s *Simulator) {
+		s.BurstMultiplier = multiplier
+	}
+}
+
+func WithBurstDuration(duration int) SimulatorOption {
+	return func(s *Simulator) {
+		s.BurstDuration = duration
+	}
+}
+
+func WithEventsPerSecond(eventsPerSecond int) SimulatorOption {
+	return func(s *Simulator) {
+		s.EventsPerSecond = eventsPerSecond
+	}
+}
+
+func WithBurstProbability(probability float64) SimulatorOption {
+	return func(s *Simulator) {
+		s.BurstProbability = probability
 	}
 }
 
 func (s *Simulator) Name() string { return "local-simulator" }
 
 func (s *Simulator) Subscribe(ctx context.Context) (<-chan models.FirehoseEvent, error) {
+	l := slog.Default()
 	ch := make(chan models.FirehoseEvent, s.EventsPerSecond) // buffer = 1 second of events
+
+	l.Info("subscribing to firehose", "events_per_second", s.EventsPerSecond, "burst_duration", s.BurstDuration, "burst_multiplier", s.BurstMultiplier, "simulator_concurrency", s.SimulatorConcurrency)
+	burstDuration := time.Duration(s.BurstDuration) * time.Second
 
 	go func() {
 		defer close(ch)
@@ -36,7 +96,7 @@ func (s *Simulator) Subscribe(ctx context.Context) (<-chan models.FirehoseEvent,
 		ticker := time.NewTicker(time.Second / time.Duration(s.EventsPerSecond))
 		defer ticker.Stop()
 
-		burstTicker := time.NewTicker(10 * time.Second)
+		burstTicker := time.NewTicker(burstDuration)
 		defer burstTicker.Stop()
 
 		inBurst := false
@@ -50,12 +110,14 @@ func (s *Simulator) Subscribe(ctx context.Context) (<-chan models.FirehoseEvent,
 			case <-burstTicker.C:
 				// randomly trigger a burst ~30% of the time
 				if rand.Float64() < 0.3 {
+					l.Info("triggering burst")
 					inBurst = true
 					burstEnd = time.Now().Add(2 * time.Second)
 				}
 
 			case t := <-ticker.C:
 				if inBurst && time.Now().After(burstEnd) {
+					l.Info("burst ended")
 					inBurst = false
 				}
 
@@ -121,7 +183,7 @@ func generateEvent(t time.Time) models.FirehoseEvent {
 
 	evt := models.FirehoseEvent{
 		ID:         fmt.Sprintf("evt-%d", counter),
-		DID:        fmt.Sprintf("did:plc:1234567890abcdefghijklmnopqrstuvwxyz"),
+		DID:        fmt.Sprintf("did:plc:%016x", rand.Int64N(16)),
 		Kind:       kind,
 		CreatedAt:  t,
 		ReceivedAt: time.Now(),
