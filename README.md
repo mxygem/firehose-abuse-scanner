@@ -2,6 +2,43 @@
 
 A high-throughput event ingestion and analysis service that consumes Bluesky event data, running abuse detection rules against, and surfaces flagged content through an administration dashboard.
 
+## Architecture
+
+```
+┌─────────────────┐
+│  Firehose       │
+│  (Simulator or  │      Configurable event rate
+│  WebSocket)     │      & burst patterns
+└────────┬────────┘
+         │
+         │ FirehoseEvent channel
+         │
+┌────────▼──────────────────────────────────────┐
+│  Pipeline (Fan-in)                             │
+│  ├─ Receive loop (single goroutine)            │
+│  └─ Work queue (buffered channel)              │
+│     BACKPRESSURE_MODE: drop or block           │
+└────────┬──────────────────────────────────────┘
+         │
+         │ Work distribution
+         │
+    ┌────┴─────────────────────────┐
+    │                              │
+┌───▼──┐  ┌──────┐  ┌──────┐  ┌──▼───┐
+│ W1   │  │ W2   │  │ W3   │  │ ...  │  Worker pool (configurable count)
+│      │  │      │  │      │  │      │
+└───┬──┘  └──┬───┘  └──┬───┘  └──┬───┘
+    │       │        │        │
+    │       │        │        │  Handler.Handle()
+    └───────┼────────┼────────┘  (abuse detection)
+            │
+         Stats (atomic counters)
+         ├─ Received
+         ├─ Processed
+         ├─ Dropped
+         └─ Errors
+```
+
 ## Running
 
 Prerequisites:
