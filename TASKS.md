@@ -22,7 +22,7 @@ Goal: a running Scylla node and a handler that durably writes every event the pi
   - Table `flagged_events` — partition by `bucket_hour`, cluster by `(received_at DESC, id)`. Holds detector hits.
   - Document the partition-key reasoning inline (atproto DIDs are naturally high-cardinality → good partition keys; minute buckets prevent hot partitions on the time-series table).
 
-- [ ] **1.3 Scylla client wrapper (`internal/storage/scylla`)**
+- [X] **1.3 Scylla client wrapper (`internal/storage/scylla`)**
   - Wrap `gocql` with a small `Store` struct exposing `InsertEvent`, `InsertFlagged`, `Close`.
   - Connection config (hosts, keyspace, consistency, timeout) added to `Config` and `config.*.json`.
   - Use prepared statements; reuse a single session.

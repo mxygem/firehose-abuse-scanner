@@ -5,5 +5,9 @@
     "backpressure_mode": "block",
     "simulator_concurrency": 2,
     "burst_multiplier": 3.0,
-    "burst_duration": 10
+    "burst_duration": 10,
+    "scylla_hosts": ["127.0.0.1:9042"],
+    "scylla_keyspace": "firehose_scanner",
+    "scylla_consistency": "ONE",
+    "scylla_timeout_ms": 5000
 }

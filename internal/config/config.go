@@ -29,6 +29,12 @@ type Config struct {
 	PostgresDSN string
 	RedisAddr   string
 
+	// Scylla
+	ScyllaHosts       []string
+	ScyllaKeyspace    string
+	ScyllaConsistency string
+	ScyllaTimeoutMS   int
+
 	// Observability
 	MetricsAddr string
 
@@ -67,6 +73,10 @@ func MustLoad(env string) *Config {
 		SimulatorConcurrency: k.Int("simulator_concurrency"),
 		BurstMultiplier:      k.Float64("burst_multiplier"),
 		BurstDuration:        k.Int("burst_duration"),
+		ScyllaHosts:          k.Strings("scylla_hosts"),
+		ScyllaKeyspace:       k.String("scylla_keyspace"),
+		ScyllaConsistency:    k.String("scylla_consistency"),
+		ScyllaTimeoutMS:      k.Int("scylla_timeout_ms"),
 	}
 	l.Info("config from files", "config", cfg)
 
@@ -140,6 +150,23 @@ func MustLoad(env string) *Config {
 			panic(fmt.Errorf("METRICS_ADDR is required"))
 		}
 		cfg.MetricsAddr = v
+	}
+
+	if v := os.Getenv("SCYLLA_HOSTS"); v != "" {
+		cfg.ScyllaHosts = strings.Split(v, ",")
+	}
+	if v := os.Getenv("SCYLLA_KEYSPACE"); v != "" {
+		cfg.ScyllaKeyspace = v
+	}
+	if v := os.Getenv("SCYLLA_CONSISTENCY"); v != "" {
+		cfg.ScyllaConsistency = v
+	}
+	if v := os.Getenv("SCYLLA_TIMEOUT_MS"); v != "" {
+		ms, err := strconv.Atoi(v)
+		if err != nil {
+			panic(fmt.Errorf("invalid SCYLLA_TIMEOUT_MS: %v", err))
+		}
+		cfg.ScyllaTimeoutMS = ms
 	}
 
 	l.Info("config from environment variables", "config", cfg)

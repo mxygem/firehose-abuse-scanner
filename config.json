@@ -2,5 +2,9 @@
     "worker_count": 1,
     "channel_buffer": 5,
     "events_per_second": 10,
-    "backpressure_mode": "block"
+    "backpressure_mode": "block",
+    "scylla_hosts": ["127.0.0.1:9042"],
+    "scylla_keyspace": "firehose_scanner",
+    "scylla_consistency": "ONE",
+    "scylla_timeout_ms": 5000
 }
