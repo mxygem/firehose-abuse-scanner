@@ -10,12 +10,12 @@ Each task is intended to be a single, reviewable change. Phases are sequential; 
 
 Goal: a running Scylla node and a handler that durably writes every event the pipeline processes.
 
-- [ ] **1.1 Add Scylla to docker-compose**
+- [X] **1.1 Add Scylla to docker-compose**
   - Single-node `scylladb/scylla` service with `--smp 2 --memory 1G --overprovisioned 1` for laptop-friendly resource use.
   - Healthcheck on CQL port 9042.
   - Document `docker compose up scylla` in the README.
 
-- [ ] **1.2 Schema design (`schema.cql`)**
+- [X] **1.2 Schema design (`schema.cql`)**
   - Keyspace with `SimpleStrategy` RF=1 (single node demo).
   - Table `events_by_did` — partition by `did`, cluster by `(received_at DESC, id)`. Stores raw events for per-author lookups.
   - Table `events_by_minute` — partition by `(kind, bucket_minute)`, cluster by `(received_at DESC, id)`. Supports time-window scans for rate analysis.
