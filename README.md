@@ -92,6 +92,19 @@ Wipe the volume too (fresh schema on next boot):
 docker compose down -v
 ```
 
+#### Connection settings
+
+The scanner reads Scylla connection details from `config.json` / `config.<env>.json`, with `SCYLLA_*` env vars taking precedence:
+
+| config key           | env var              | default              | notes                                        |
+| -------------------- | -------------------- | -------------------- | -------------------------------------------- |
+| `scylla_hosts`       | `SCYLLA_HOSTS`       | `["127.0.0.1:9042"]` | env var is comma-separated (`host1,host2`)   |
+| `scylla_keyspace`    | `SCYLLA_KEYSPACE`    | `firehose_scanner`   | created on first boot via embedded schema    |
+| `scylla_consistency` | `SCYLLA_CONSISTENCY` | `ONE`                | matches RF=1 single-node demo                |
+| `scylla_timeout_ms`  | `SCYLLA_TIMEOUT_MS`  | `5000`               | applies to both connect and per-query timeout |
+
+The schema in [internal/storage/scylla/schema.cql](internal/storage/scylla/schema.cql) is embedded into the binary and applied (idempotently) on every startup, so a fresh `docker compose down -v && docker compose up -d db` is enough to reset state for a clean demo run.
+
 ### Sample output
 
 ```bash

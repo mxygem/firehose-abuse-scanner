@@ -22,6 +22,7 @@ func TestNewSimulator(t *testing.T) {
 				SimulatorConcurrency: DefaultSimulatorConcurrency,
 				BurstMultiplier:      DefaultBurstMultiplier,
 				BurstDuration:        DefaultBurstDuration,
+				BurstProbability:     DefaultBurstProbability,
 			},
 		},
 		{
@@ -32,6 +33,7 @@ func TestNewSimulator(t *testing.T) {
 				SimulatorConcurrency: DefaultSimulatorConcurrency,
 				BurstMultiplier:      DefaultBurstMultiplier,
 				BurstDuration:        DefaultBurstDuration,
+				BurstProbability:     DefaultBurstProbability,
 			},
 		},
 		{
@@ -42,6 +44,7 @@ func TestNewSimulator(t *testing.T) {
 				SimulatorConcurrency: DefaultSimulatorConcurrency,
 				BurstMultiplier:      5,
 				BurstDuration:        DefaultBurstDuration,
+				BurstProbability:     DefaultBurstProbability,
 			},
 		},
 		{
@@ -52,6 +55,7 @@ func TestNewSimulator(t *testing.T) {
 				SimulatorConcurrency: DefaultSimulatorConcurrency,
 				BurstMultiplier:      DefaultBurstMultiplier,
 				BurstDuration:        10,
+				BurstProbability:     DefaultBurstProbability,
 			},
 		},
 		{
@@ -62,6 +66,7 @@ func TestNewSimulator(t *testing.T) {
 				SimulatorConcurrency: 7,
 				BurstMultiplier:      DefaultBurstMultiplier,
 				BurstDuration:        DefaultBurstDuration,
+				BurstProbability:     DefaultBurstProbability,
 			},
 		},
 		{
@@ -72,6 +77,7 @@ func TestNewSimulator(t *testing.T) {
 				SimulatorConcurrency: 12,
 				BurstMultiplier:      DefaultBurstMultiplier,
 				BurstDuration:        DefaultBurstDuration,
+				BurstProbability:     DefaultBurstProbability,
 			},
 		},
 		{
@@ -87,6 +93,7 @@ func TestNewSimulator(t *testing.T) {
 				SimulatorConcurrency: 3,
 				BurstMultiplier:      4,
 				BurstDuration:        25,
+				BurstProbability:     DefaultBurstProbability,
 			},
 		},
 	}

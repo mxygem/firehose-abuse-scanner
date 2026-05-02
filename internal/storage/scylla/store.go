@@ -15,7 +15,11 @@ import (
 	"github.com/gocql/gocql"
 
 	"github.com/mxygem/firehose-abuse-scanner/internal/models"
+	"github.com/mxygem/firehose-abuse-scanner/internal/storage"
 )
+
+// Compile-time check: *Store satisfies storage.Storer.
+var _ storage.Storer = (*Store)(nil)
 
 //go:embed schema.cql
 var schemaCQL string
@@ -27,21 +31,6 @@ type Config struct {
 	Keyspace    string
 	Consistency string
 	Timeout     time.Duration
-}
-
-// FlaggedRecord is the persistence-layer view of a detector hit. The
-// detect package will produce its own Hit type in Phase 2; the composite
-// handler translates Hit → FlaggedRecord at write time.
-type FlaggedRecord struct {
-	EventID    string
-	DID        string
-	Kind       models.EventKind
-	Text       string
-	ReceivedAt time.Time
-	RuleID     string
-	Severity   string
-	Reason     string
-	Evidence   map[string]string
 }
 
 type Store struct {
@@ -107,7 +96,7 @@ func (s *Store) InsertEvent(ctx context.Context, e models.FirehoseEvent) error {
 	return nil
 }
 
-func (s *Store) InsertFlagged(ctx context.Context, r FlaggedRecord) error {
+func (s *Store) InsertFlagged(ctx context.Context, r storage.FlaggedRecord) error {
 	bucketHour := r.ReceivedAt.Truncate(time.Hour)
 
 	if err := s.session.Query(insertFlaggedStmt,
@@ -119,10 +108,11 @@ func (s *Store) InsertFlagged(ctx context.Context, r FlaggedRecord) error {
 	return nil
 }
 
-func (s *Store) Close() {
+func (s *Store) Close() error {
 	if s.session != nil {
 		s.session.Close()
 	}
+	return nil
 }
 
 // bootstrap opens a no-keyspace session, applies every statement in the
@@ -177,7 +167,7 @@ func splitStatements(s string) []string {
 	out := make([]string, 0, len(parts))
 	for _, p := range parts {
 		var lines []string
-		for _, line := range strings.Split(p, "\n") {
+		for line := range strings.SplitSeq(p, "\n") {
 			if idx := strings.Index(line, "--"); idx >= 0 {
 				line = line[:idx]
 			}
