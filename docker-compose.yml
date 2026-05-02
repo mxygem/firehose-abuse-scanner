@@ -1,0 +1,23 @@
+services:
+  db:
+    image: scylladb/scylla:5.4
+    container_name: firehose-scylla
+    ports:
+      - "9042:9042"
+    command: --smp 2 --memory 1G --overprovisioned 1 --developer-mode 1
+    volumes:
+      - scylla-data:/var/lib/scylla
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "cqlsh -e 'SELECT now() FROM system.local' >/dev/null 2>&1",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    restart: unless-stopped
+
+volumes:
+  scylla-data:

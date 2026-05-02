@@ -44,6 +44,7 @@ A high-throughput event ingestion and analysis service that consumes Bluesky eve
 Prerequisites:
 
 * [go](https://go.dev/) - Known working with go version `1.26.2`
+* [Docker](https://docs.docker.com/get-docker/) with Compose v2 — only needed once the storage layer is wired up (Phase 1)
 
 With defaults (50 workers, 10k channel buffer):
 
@@ -55,6 +56,40 @@ With overridden values:
 
 ```bash
 BACKPRESSURE_MODE=block WORKER_COUNT=100 EVENTS_PER_SECOND=10000 go run ./cmd/scanner
+```
+
+### Storage (Scylla)
+
+The scanner persists events to a single-node [Scylla](https://www.scylladb.com/) instance for the demo. Bluesky runs Scylla in production for the atproto data plane, so the schema and partitioning choices in this repo mirror that environment.
+
+Bring it up:
+
+```bash
+docker compose up -d db
+```
+
+The service is tuned for laptop use (`--smp 2 --memory 1G --overprovisioned 1 --developer-mode 1`). Bootstrap takes ~15–30 seconds; wait for the healthcheck to go green before pointing the scanner at it:
+
+```bash
+docker compose ps      # STATUS should show "healthy"
+```
+
+Connect a CQL shell for ad-hoc queries:
+
+```bash
+docker exec -it firehose-scylla cqlsh
+```
+
+Tear down (data persists in the `scylla-data` volume):
+
+```bash
+docker compose down
+```
+
+Wipe the volume too (fresh schema on next boot):
+
+```bash
+docker compose down -v
 ```
 
 ### Sample output
