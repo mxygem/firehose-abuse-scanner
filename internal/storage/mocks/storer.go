@@ -143,7 +143,6 @@ func (_c *MockStorer_InsertEvent_Call) RunAndReturn(run func(ctx context.Context
 // InsertFlagged provides a mock function for the type MockStorer
 func (_mock *MockStorer) InsertFlagged(ctx context.Context, r storage.FlaggedRecord) error {
 	ret := _mock.Called(ctx, r)
-
 	if len(ret) == 0 {
 		panic("no return value specified for InsertFlagged")
 	}

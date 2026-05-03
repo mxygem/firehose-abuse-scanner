@@ -1,23 +1,94 @@
-services:
-  db:
-    image: scylladb/scylla:5.4
-    container_name: firehose-scylla
-    ports:
-      - "9042:9042"
-    command: --smp 2 --memory 1G --overprovisioned 1 --developer-mode 1
-    volumes:
-      - scylla-data:/var/lib/scylla
-    healthcheck:
-      test:
-        [
-          "CMD-SHELL",
-          "cqlsh -e 'SELECT now() FROM system.local' >/dev/null 2>&1",
-        ]
-      interval: 10s
-      timeout: 5s
-      retries: 12
-      start_period: 30s
-    restart: unless-stopped
+# services:
+#   db:
+#     image: scylladb/scylla:5.4
+#     container_name: firehose-scylla
+#     ports:
+#       - "9042:9042"
+#     command: --smp 3 --memory 1G --developer-mode 1
+#     volumes:
+#       - scylla-data:/var/lib/scylla
+#     healthcheck:
+#       test:
+#         [
+#           "CMD-SHELL",
+#           "cqlsh -e 'SELECT now() FROM system.local' >/dev/null 2>&1",
+#         ]
+#       interval: 10s
+#       timeout: 5s
+#       retries: 12
+#       start_period: 30s
+#     restart: unless-stopped
 
-volumes:
-  scylla-data:
+# volumes:
+#   scylla-data:
+  name: scylla-cluster
+services:
+  scylla-node1:
+    container_name: scylla-node1
+    hostname: scylla-node1
+    image: scylladb/scylla:latest
+    command: --seeds=scylla-node1 --smp 1 --memory 750M
+    restart: unless-stopped
+    volumes:
+      - "./config/scylla.yaml:/etc/scylla/scylla.yaml"
+      - "./config/cassandra-rackdc.properties:/etc/scylla/cassandra-rackdc.properties"
+      - "/etc/localtime:/etc/localtime:ro" # Sync the container's timezone with the host
+      - "./certs:/etc/scylla/certs"
+      # - "./config/cqlshrc:/root/.cassandra/cqlshrc"
+    ports:
+      - 9100:9100 # Node Exporter
+      - 9180:9180 # Scylla Metrics
+      - 9042:9042 # Use this port for the Cassandra native protocol
+      - 9160:9160 # Use this port for the thrift protocol
+      - 7199:7199 # Use this port for JMX
+    networks:
+      vnet:
+
+  scylla-node2:
+    container_name: scylla-node2
+    hostname: scylla-node2
+    image: scylladb/scylla:latest
+    command: --seeds=scylla-node1,scylla-node2 --smp 1 --memory 750M
+    restart: unless-stopped
+    volumes:
+      - "./config/scylla.yaml:/etc/scylla/scylla.yaml"
+      - "./config/cassandra-rackdc.properties:/etc/scylla/cassandra-rackdc.properties"
+      - "/etc/localtime:/etc/localtime:ro" # Sync the container's timezone with the host
+      - "./certs:/etc/scylla/certs"
+    ports:
+      - 9101:9100 # Node Exporter
+      - 9181:9180 # Scylla Metrics
+      - 9043:9042 # Use this port for the Cassandra native protocol
+      - 9161:9160 # Use this port for the thrift protocol
+      - 7200:7199 # Use this port for JMX
+    depends_on:
+      - scylla-node1
+    networks:
+      vnet:
+
+  scylla-node3:
+    container_name: scylla-node3
+    hostname: scylla-node3
+    image: scylladb/scylla:latest
+    command: --seeds=scylla-node1,scylla-node2 --smp 1 --memory 750M
+    restart: unless-stopped
+    volumes:
+      - "./config/scylla.yaml:/etc/scylla/scylla.yaml"
+      - "./config/cassandra-rackdc.properties:/etc/scylla/cassandra-rackdc.properties"
+      - "/etc/localtime:/etc/localtime:ro" # Sync the container's timezone with the host
+      - "./certs:/etc/scylla/certs"
+    ports:
+      - 9102:9100 # Node Exporter
+      - 9182:9180 # Scylla Metrics
+      - 9044:9042 # Use this port for the Cassandra native protocol
+      - 9162:9160 # Use this port for the thrift protocol
+      - 7201:7199 # Use this port for JMX
+    depends_on:
+      - scylla-node1
+      - scylla-node2
+    networks:
+      vnet:
+
+networks:
+  vnet:
+    driver: bridge

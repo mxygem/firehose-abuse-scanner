@@ -9,6 +9,7 @@ import (
 	"context"
 	_ "embed"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -27,6 +28,7 @@ var schemaCQL string
 // Config carries everything needed to dial Scylla. Hosts are "host:port"
 // strings; an empty Consistency defaults to ONE (matches RF=1 demo).
 type Config struct {
+	Logger      *slog.Logger
 	Hosts       []string
 	Keyspace    string
 	Consistency string
@@ -35,6 +37,7 @@ type Config struct {
 
 type Store struct {
 	session *gocql.Session
+	l       *slog.Logger
 }
 
 const (
@@ -58,6 +61,13 @@ const (
 // ready-to-use Store. Bootstrap is idempotent (CREATE ... IF NOT EXISTS)
 // so it's safe to run on every startup.
 func New(ctx context.Context, cfg Config) (*Store, error) {
+	s := &Store{
+		l: cfg.Logger,
+	}
+	if s.l == nil {
+		s.l = slog.Default()
+	}
+
 	if err := bootstrap(ctx, cfg); err != nil {
 		return nil, fmt.Errorf("bootstrap schema: %w", err)
 	}
@@ -69,8 +79,9 @@ func New(ctx context.Context, cfg Config) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create session: %w", err)
 	}
+	s.session = session
 
-	return &Store{session: session}, nil
+	return s, nil
 }
 
 // InsertEvent writes the same event into both views (events_by_did and
@@ -99,9 +110,11 @@ func (s *Store) InsertEvent(ctx context.Context, e models.FirehoseEvent) error {
 func (s *Store) InsertFlagged(ctx context.Context, r storage.FlaggedRecord) error {
 	bucketHour := r.ReceivedAt.Truncate(time.Hour)
 
-	if err := s.session.Query(insertFlaggedStmt,
+	q := s.session.Query(insertFlaggedStmt,
 		bucketHour, r.ReceivedAt, r.EventID, r.RuleID, r.DID, string(r.Kind), r.Text, r.Severity, r.Reason, r.Evidence,
-	).WithContext(ctx).Exec(); err != nil {
+	).WithContext(ctx)
+	s.l.Debug("insert flagged event", "query", q)
+	if err := q.Exec(); err != nil {
 		return fmt.Errorf("insert flagged_events: %w", err)
 	}
 
@@ -148,6 +161,10 @@ func bootstrap(ctx context.Context, cfg Config) error {
 func newCluster(cfg Config) *gocql.ClusterConfig {
 	cluster := gocql.NewCluster(cfg.Hosts...)
 	cluster.Consistency = parseConsistency(cfg.Consistency)
+	// Scylla 5.x supports CQL native protocol v4. Setting it explicitly
+	// avoids gocql's startup-time protocol discovery, which can fail while
+	// a single-node dev container is still warming up.
+	cluster.ProtoVersion = 4
 	if cfg.Timeout > 0 {
 		cluster.Timeout = cfg.Timeout
 		cluster.ConnectTimeout = cfg.Timeout

@@ -27,11 +27,37 @@ import (
 	"github.com/mxygem/firehose-abuse-scanner/internal/storage"
 )
 
+func waitForScylla(t *testing.T, ctx context.Context, cfg Config) {
+	t.Helper()
+
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+
+	var lastErr error
+	for {
+		cluster := newCluster(cfg)
+		sess, err := cluster.CreateSession()
+		if err == nil {
+			err = sess.Query(`SELECT now() FROM system.local`).WithContext(ctx).Exec()
+			sess.Close()
+		}
+		if err == nil {
+			return
+		}
+		lastErr = err
+
+		select {
+		case <-ctx.Done():
+			t.Fatalf("scylla not ready at %v: %v", cfg.Hosts, lastErr)
+		case <-ticker.C:
+		}
+	}
+}
+
 // newTestStore connects to Scylla, applies the schema into a unique
-// keyspace, registers cleanup, and returns the live Store. If Scylla
-// isn't reachable the test is skipped (rather than failed) so a
-// developer running the suite without docker compose up still gets a
-// useful signal.
+// keyspace, registers cleanup, and returns the live Store. Because this
+// file is behind the integration build tag, an unreachable Scylla node is
+// treated as a test failure after the readiness timeout.
 func newTestStore(t *testing.T) (*Store, Config) {
 	t.Helper()
 
@@ -46,13 +72,14 @@ func newTestStore(t *testing.T) (*Store, Config) {
 		Timeout:  5 * time.Second,
 	}
 
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer waitCancel()
+	waitForScylla(t, waitCtx, cfg)
+
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-
 	s, err := New(ctx, cfg)
-	if err != nil {
-		t.Skipf("scylla not reachable at %v: %v", cfg.Hosts, err)
-	}
+	require.NoError(t, err)
 
 	t.Cleanup(func() {
 		// Drop the keyspace before closing the session so the next run
@@ -186,9 +213,12 @@ func TestBootstrap_AgainstFreshSession(t *testing.T) {
 		Timeout:  5 * time.Second,
 	}
 
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer waitCancel()
+	waitForScylla(t, waitCtx, cfg)
+
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-
 	if err := bootstrap(ctx, cfg); err != nil {
 		// Cluster isn't up — same skip pathway as newTestStore.
 		t.Skipf("scylla not reachable at %v: %v", cfg.Hosts, err)
