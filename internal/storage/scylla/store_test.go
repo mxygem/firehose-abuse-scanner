@@ -3,21 +3,106 @@ package scylla
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"testing"
 	"time"
 
+	gocqlmock "github.com/Agent-Plus/gocqlmock"
 	"github.com/gocql/gocql"
-	"github.com/mxygem/firehose-abuse-scanner/internal/models"
-	"github.com/mxygem/firehose-abuse-scanner/internal/storage"
-	"github.com/mxygem/firehose-abuse-scanner/internal/storage/mocks"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/mxygem/firehose-abuse-scanner/internal/models"
+	"github.com/mxygem/firehose-abuse-scanner/internal/storage"
 )
 
-func TestInsertFlagged(t *testing.T) {
+// mockCQLSession wraps *gocqlmock.Session to satisfy the unexported cqlSession
+// interface. ExpectQuery/ExpectExec/etc. are promoted from the embedded type,
+// so tests set expectations directly on *mockCQLSession.
+type mockCQLSession struct {
+	*gocqlmock.Session
+}
+
+// QueryContext satisfies cqlSession. Context is ignored by the mock —
+// gocqlmock matches expectations by query regex and argument order only.
+func (m *mockCQLSession) QueryContext(_ context.Context, stmt string, args ...interface{}) cqlQuery {
+	return m.Session.Query(stmt, args...)
+}
+
+func (m *mockCQLSession) Close() {}
+
+// newMockStore returns a Store wired to a fresh gocqlmock session.
+// Callers set expectations on the returned *mockCQLSession before exercising
+// the Store method under test.
+func newMockStore(t *testing.T) (*Store, *mockCQLSession) {
+	t.Helper()
+	ms := &mockCQLSession{gocqlmock.New(t)}
+	return &Store{session: ms, l: slog.Default()}, ms
+}
+
+func TestStore_InsertEvent(t *testing.T) {
 	ctx := context.Background()
-	now := time.Date(2026, 5, 2, 20, 30, 15, 123000000, time.UTC)
-	record := storage.FlaggedRecord{
+	now := time.Date(2026, 5, 3, 10, 0, 0, 0, time.UTC)
+	evt := models.FirehoseEvent{
+		ID:         "evt-1",
+		DID:        "did:plc:test",
+		Kind:       models.EventPost,
+		Text:       "hello",
+		Langs:      []string{"en"},
+		Links:      []string{"https://bsky.app"},
+		CreatedAt:  now.Add(-time.Second),
+		ReceivedAt: now,
+	}
+	dbErr := errors.New("db error")
+
+	tests := []struct {
+		name        string
+		setup       func(*mockCQLSession)
+		expectedErr string
+	}{
+		{
+			name: "both views written successfully",
+			setup: func(ms *mockCQLSession) {
+				ms.ExpectQuery(`INSERT INTO events_by_did`).ExpectExec()
+				ms.ExpectQuery(`INSERT INTO events_by_minute`).ExpectExec()
+			},
+		},
+		{
+			name: "events_by_did write fails",
+			setup: func(ms *mockCQLSession) {
+				ms.ExpectQuery(`INSERT INTO events_by_did`).ExpectExec().WithError(dbErr)
+			},
+			expectedErr: "insert events_by_did",
+		},
+		{
+			name: "events_by_minute write fails",
+			setup: func(ms *mockCQLSession) {
+				ms.ExpectQuery(`INSERT INTO events_by_did`).ExpectExec()
+				ms.ExpectQuery(`INSERT INTO events_by_minute`).ExpectExec().WithError(dbErr)
+			},
+			expectedErr: "insert events_by_minute",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			store, ms := newMockStore(t)
+			tc.setup(ms)
+
+			err := store.InsertEvent(ctx, evt)
+			if tc.expectedErr != "" {
+				require.ErrorContains(t, err, tc.expectedErr)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
+
+func TestStore_InsertFlagged(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 5, 3, 10, 0, 0, 0, time.UTC)
+	rec := storage.FlaggedRecord{
 		EventID:    "evt-1",
 		DID:        "did:plc:test",
 		Kind:       models.EventPost,
@@ -30,96 +115,34 @@ func TestInsertFlagged(t *testing.T) {
 	}
 	dbErr := errors.New("db error")
 
-	testCases := []struct {
+	tests := []struct {
 		name        string
-		inputRecord storage.FlaggedRecord
-		setupMock   func(t *testing.T, input storage.FlaggedRecord) storage.Storer
-		expectedErr error
+		setup       func(*mockCQLSession)
+		expectedErr string
 	}{
 		{
-			name:        "successful insert passes the full flagged record",
-			inputRecord: record,
-			setupMock: func(t *testing.T, input storage.FlaggedRecord) storage.Storer {
-				ms := mocks.NewMockStorer(t)
-				ms.EXPECT().InsertFlagged(ctx, input).Return(nil).Once()
-				return ms
+			name: "flagged record written successfully",
+			setup: func(ms *mockCQLSession) {
+				ms.ExpectQuery(`INSERT INTO flagged_events`).ExpectExec()
 			},
 		},
 		{
-			name:        "running query fails and returns db error",
-			inputRecord: record,
-			setupMock: func(t *testing.T, input storage.FlaggedRecord) storage.Storer {
-				ms := mocks.NewMockStorer(t)
-				ms.EXPECT().InsertFlagged(ctx, input).Return(dbErr).Once()
-				return ms
+			name: "write fails returns wrapped error",
+			setup: func(ms *mockCQLSession) {
+				ms.ExpectQuery(`INSERT INTO flagged_events`).ExpectExec().WithError(dbErr)
 			},
-			expectedErr: dbErr,
+			expectedErr: "insert flagged_events",
 		},
 	}
 
-	for _, tc := range testCases {
+	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			storer := tc.setupMock(t, tc.inputRecord)
+			store, ms := newMockStore(t)
+			tc.setup(ms)
 
-			err := storer.InsertFlagged(ctx, tc.inputRecord)
-			if tc.expectedErr != nil {
-				require.ErrorIs(t, err, tc.expectedErr)
-				return
-			}
-			require.NoError(t, err)
-		})
-	}
-}
-
-func TestInsertEvent(t *testing.T) {
-	ctx := context.Background()
-	now := time.Date(2026, 5, 2, 20, 30, 15, 123000000, time.UTC)
-	event := models.FirehoseEvent{
-		ID:         "evt-1",
-		DID:        "did:plc:test",
-		Kind:       models.EventPost,
-		Text:       "hello",
-		Langs:      []string{"en"},
-		Links:      []string{"https://bsky.app"},
-		CreatedAt:  now.Add(-time.Second),
-		ReceivedAt: now,
-	}
-	dbErr := errors.New("db error")
-
-	testCases := []struct {
-		name        string
-		inputEvent  models.FirehoseEvent
-		setupMock   func(t *testing.T, input models.FirehoseEvent) storage.Storer
-		expectedErr error
-	}{
-		{
-			name:       "successful insert passes the full event",
-			inputEvent: event,
-			setupMock: func(t *testing.T, input models.FirehoseEvent) storage.Storer {
-				ms := mocks.NewMockStorer(t)
-				ms.EXPECT().InsertEvent(ctx, input).Return(nil).Once()
-				return ms
-			},
-		},
-		{
-			name:       "running query fails and returns db error",
-			inputEvent: event,
-			setupMock: func(t *testing.T, input models.FirehoseEvent) storage.Storer {
-				ms := mocks.NewMockStorer(t)
-				ms.EXPECT().InsertEvent(ctx, input).Return(dbErr).Once()
-				return ms
-			},
-			expectedErr: dbErr,
-		},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			storer := tc.setupMock(t, tc.inputEvent)
-
-			err := storer.InsertEvent(ctx, tc.inputEvent)
-			if tc.expectedErr != nil {
-				require.ErrorIs(t, err, tc.expectedErr)
+			err := store.InsertFlagged(ctx, rec)
+			if tc.expectedErr != "" {
+				require.ErrorContains(t, err, tc.expectedErr)
 				return
 			}
 			require.NoError(t, err)

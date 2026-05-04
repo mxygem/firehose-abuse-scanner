@@ -33,10 +33,11 @@ type Config struct {
 	Keyspace    string
 	Consistency string
 	Timeout     time.Duration
+	NumConns    int
 }
 
 type Store struct {
-	session *gocql.Session
+	session cqlSession
 	l       *slog.Logger
 }
 
@@ -79,7 +80,7 @@ func New(ctx context.Context, cfg Config) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create session: %w", err)
 	}
-	s.session = session
+	s.session = &realSession{s: session}
 
 	return s, nil
 }
@@ -92,15 +93,15 @@ func New(ctx context.Context, cfg Config) (*Store, error) {
 func (s *Store) InsertEvent(ctx context.Context, e models.FirehoseEvent) error {
 	bucketMinute := e.ReceivedAt.Truncate(time.Minute)
 
-	if err := s.session.Query(insertEventByDIDStmt,
+	if err := s.session.QueryContext(ctx, insertEventByDIDStmt,
 		e.DID, e.ReceivedAt, e.ID, string(e.Kind), e.Text, e.Langs, e.Links, e.CreatedAt,
-	).WithContext(ctx).Exec(); err != nil {
+	).Exec(); err != nil {
 		return fmt.Errorf("insert events_by_did: %w", err)
 	}
 
-	if err := s.session.Query(insertEventByMinuteStmt,
+	if err := s.session.QueryContext(ctx, insertEventByMinuteStmt,
 		string(e.Kind), bucketMinute, e.ReceivedAt, e.ID, e.DID, e.Text, e.Langs, e.Links, e.CreatedAt,
-	).WithContext(ctx).Exec(); err != nil {
+	).Exec(); err != nil {
 		return fmt.Errorf("insert events_by_minute: %w", err)
 	}
 
@@ -110,11 +111,9 @@ func (s *Store) InsertEvent(ctx context.Context, e models.FirehoseEvent) error {
 func (s *Store) InsertFlagged(ctx context.Context, r storage.FlaggedRecord) error {
 	bucketHour := r.ReceivedAt.Truncate(time.Hour)
 
-	q := s.session.Query(insertFlaggedStmt,
+	if err := s.session.QueryContext(ctx, insertFlaggedStmt,
 		bucketHour, r.ReceivedAt, r.EventID, r.RuleID, r.DID, string(r.Kind), r.Text, r.Severity, r.Reason, r.Evidence,
-	).WithContext(ctx)
-	s.l.Debug("insert flagged event", "query", q)
-	if err := q.Exec(); err != nil {
+	).Exec(); err != nil {
 		return fmt.Errorf("insert flagged_events: %w", err)
 	}
 
@@ -185,6 +184,9 @@ func newCluster(cfg Config) *gocql.ClusterConfig {
 	if cfg.Timeout > 0 {
 		cluster.Timeout = cfg.Timeout
 		cluster.ConnectTimeout = cfg.Timeout
+	}
+	if cfg.NumConns > 0 {
+		cluster.NumConns = cfg.NumConns
 	}
 	return cluster
 }

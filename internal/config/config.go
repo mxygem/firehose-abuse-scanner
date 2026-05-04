@@ -31,10 +31,16 @@ type Config struct {
 	RedisAddr   string
 
 	// Scylla
-	ScyllaHosts       []string
-	ScyllaKeyspace    string
-	ScyllaConsistency string
-	ScyllaTimeoutMS   int
+	ScyllaHosts             []string
+	ScyllaKeyspace          string
+	ScyllaConsistency       string
+	ScyllaTimeoutMS         int
+	ScyllaNumConns          int
+	ScyllaBatchSize         int
+	ScyllaBatchFlushMS      int
+	ScyllaBatchFlushWorkers int
+	ScyllaBatchQueueSize    int
+	ScyllaBatchShards       int
 
 	// Observability
 	MetricsAddr string
@@ -65,20 +71,26 @@ func MustLoad(env string) *Config {
 	}
 
 	cfg := &Config{
-		WorkerCount:          k.Int("worker_count"),
-		ChannelBuffer:        k.Int("channel_buffer"),
-		EventsPerSecond:      k.Int("events_per_second"),
-		BackpressureMode:     BackpressureMode(k.String("backpressure_mode")),
-		PostgresDSN:          k.String("postgres_dsn"),
-		RedisAddr:            k.String("redis_addr"),
-		MetricsAddr:          k.String("metrics_addr"),
-		SimulatorConcurrency: k.Int("simulator_concurrency"),
-		BurstMultiplier:      k.Float64("burst_multiplier"),
-		BurstDuration:        k.Int("burst_duration"),
-		ScyllaHosts:          k.Strings("scylla_hosts"),
-		ScyllaKeyspace:       k.String("scylla_keyspace"),
-		ScyllaConsistency:    k.String("scylla_consistency"),
-		ScyllaTimeoutMS:      k.Int("scylla_timeout_ms"),
+		WorkerCount:             k.Int("worker_count"),
+		ChannelBuffer:           k.Int("channel_buffer"),
+		EventsPerSecond:         k.Int("events_per_second"),
+		BackpressureMode:        BackpressureMode(k.String("backpressure_mode")),
+		PostgresDSN:             k.String("postgres_dsn"),
+		RedisAddr:               k.String("redis_addr"),
+		MetricsAddr:             k.String("metrics_addr"),
+		SimulatorConcurrency:    k.Int("simulator_concurrency"),
+		BurstMultiplier:         k.Float64("burst_multiplier"),
+		BurstDuration:           k.Int("burst_duration"),
+		ScyllaHosts:             k.Strings("scylla_hosts"),
+		ScyllaKeyspace:          k.String("scylla_keyspace"),
+		ScyllaConsistency:       k.String("scylla_consistency"),
+		ScyllaTimeoutMS:         k.Int("scylla_timeout_ms"),
+		ScyllaNumConns:          k.Int("scylla_num_conns"),
+		ScyllaBatchSize:         k.Int("scylla_batch_size"),
+		ScyllaBatchFlushMS:      k.Int("scylla_batch_flush_ms"),
+		ScyllaBatchFlushWorkers: k.Int("scylla_batch_flush_workers"),
+		ScyllaBatchQueueSize:    k.Int("scylla_batch_queue_size"),
+		ScyllaBatchShards:       k.Int("scylla_batch_shards"),
 	}
 	l.Info("config from files", "config", cfg)
 
@@ -176,6 +188,48 @@ func MustLoad(env string) *Config {
 			panic(fmt.Errorf("invalid SCYLLA_TIMEOUT_MS: %v", err))
 		}
 		cfg.ScyllaTimeoutMS = ms
+	}
+	if v := os.Getenv("SCYLLA_NUM_CONNS"); v != "" {
+		numConns, err := strconv.Atoi(v)
+		if err != nil {
+			panic(fmt.Errorf("invalid SCYLLA_NUM_CONNS: %v", err))
+		}
+		cfg.ScyllaNumConns = numConns
+	}
+	if v := os.Getenv("SCYLLA_BATCH_SIZE"); v != "" {
+		size, err := strconv.Atoi(v)
+		if err != nil {
+			panic(fmt.Errorf("invalid SCYLLA_BATCH_SIZE: %v", err))
+		}
+		cfg.ScyllaBatchSize = size
+	}
+	if v := os.Getenv("SCYLLA_BATCH_FLUSH_MS"); v != "" {
+		ms, err := strconv.Atoi(v)
+		if err != nil {
+			panic(fmt.Errorf("invalid SCYLLA_BATCH_FLUSH_MS: %v", err))
+		}
+		cfg.ScyllaBatchFlushMS = ms
+	}
+	if v := os.Getenv("SCYLLA_BATCH_FLUSH_WORKERS"); v != "" {
+		workers, err := strconv.Atoi(v)
+		if err != nil {
+			panic(fmt.Errorf("invalid SCYLLA_BATCH_FLUSH_WORKERS: %v", err))
+		}
+		cfg.ScyllaBatchFlushWorkers = workers
+	}
+	if v := os.Getenv("SCYLLA_BATCH_QUEUE_SIZE"); v != "" {
+		queueSize, err := strconv.Atoi(v)
+		if err != nil {
+			panic(fmt.Errorf("invalid SCYLLA_BATCH_QUEUE_SIZE: %v", err))
+		}
+		cfg.ScyllaBatchQueueSize = queueSize
+	}
+	if v := os.Getenv("SCYLLA_BATCH_SHARDS"); v != "" {
+		shards, err := strconv.Atoi(v)
+		if err != nil {
+			panic(fmt.Errorf("invalid SCYLLA_BATCH_SHARDS: %v", err))
+		}
+		cfg.ScyllaBatchShards = shards
 	}
 
 	l.Info("config from environment variables", "config", cfg)

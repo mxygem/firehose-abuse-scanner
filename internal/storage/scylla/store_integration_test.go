@@ -84,7 +84,7 @@ func newTestStore(t *testing.T) (*Store, Config) {
 	t.Cleanup(func() {
 		// Drop the keyspace before closing the session so the next run
 		// starts clean even if a test panics partway through.
-		_ = s.session.Query(`DROP KEYSPACE IF EXISTS ` + cfg.Keyspace).Exec()
+		_ = s.session.QueryContext(context.Background(), `DROP KEYSPACE IF EXISTS `+cfg.Keyspace).Exec()
 		_ = s.Close()
 	})
 
@@ -93,12 +93,13 @@ func newTestStore(t *testing.T) (*Store, Config) {
 
 func TestNew_AppliesSchemaAndIsIdempotent(t *testing.T) {
 	s, cfg := newTestStore(t)
+	ctx := context.Background()
 
 	// All three tables should exist in the keyspace after New returns.
 	tables := []string{"events_by_did", "events_by_minute", "flagged_events"}
 	for _, tbl := range tables {
 		var name string
-		err := s.session.Query(
+		err := s.session.QueryContext(ctx,
 			`SELECT table_name FROM system_schema.tables WHERE keyspace_name = ? AND table_name = ?`,
 			cfg.Keyspace, tbl,
 		).Scan(&name)
@@ -109,15 +110,16 @@ func TestNew_AppliesSchemaAndIsIdempotent(t *testing.T) {
 	// Re-running New against the same keyspace must succeed — bootstrap
 	// is the hot path on every startup so any non-idempotent CREATE
 	// would surface here.
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx2, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	s2, err := New(ctx, cfg)
+	s2, err := New(ctx2, cfg)
 	require.NoError(t, err)
 	require.NoError(t, s2.Close())
 }
 
 func TestInsertEvent_WritesBothViews(t *testing.T) {
 	s, _ := newTestStore(t)
+	ctx := context.Background()
 
 	now := time.Now().UTC().Truncate(time.Millisecond)
 	evt := models.FirehoseEvent{
@@ -131,9 +133,9 @@ func TestInsertEvent_WritesBothViews(t *testing.T) {
 		ReceivedAt: now,
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	insertCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	require.NoError(t, s.InsertEvent(ctx, evt))
+	require.NoError(t, s.InsertEvent(insertCtx, evt))
 
 	// events_by_did
 	var (
@@ -141,7 +143,7 @@ func TestInsertEvent_WritesBothViews(t *testing.T) {
 		gotKind string
 		gotText string
 	)
-	err := s.session.Query(
+	err := s.session.QueryContext(ctx,
 		`SELECT id, kind, text FROM events_by_did WHERE did = ? LIMIT 1`,
 		evt.DID,
 	).Scan(&gotID, &gotKind, &gotText)
@@ -152,17 +154,19 @@ func TestInsertEvent_WritesBothViews(t *testing.T) {
 
 	// events_by_minute — same row, partitioned by (kind, bucket_minute)
 	bucket := evt.ReceivedAt.Truncate(time.Minute)
-	err = s.session.Query(
+	var gotDID string
+	err = s.session.QueryContext(ctx,
 		`SELECT id, did FROM events_by_minute WHERE kind = ? AND bucket_minute = ? LIMIT 1`,
 		string(evt.Kind), bucket,
-	).Scan(&gotID, &gotKind /* reused as gotDID */)
+	).Scan(&gotID, &gotDID)
 	require.NoError(t, err)
 	assert.Equal(t, evt.ID, gotID)
-	assert.Equal(t, evt.DID, gotKind)
+	assert.Equal(t, evt.DID, gotDID)
 }
 
 func TestInsertFlagged_RoundTrip(t *testing.T) {
 	s, _ := newTestStore(t)
+	ctx := context.Background()
 
 	now := time.Now().UTC().Truncate(time.Millisecond)
 	rec := storage.FlaggedRecord{
@@ -177,16 +181,16 @@ func TestInsertFlagged_RoundTrip(t *testing.T) {
 		Evidence:   map[string]string{"match": "BUY NOW"},
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	insertCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	require.NoError(t, s.InsertFlagged(ctx, rec))
+	require.NoError(t, s.InsertFlagged(insertCtx, rec))
 
 	bucket := rec.ReceivedAt.Truncate(time.Hour)
 	var (
 		gotID, gotRule, gotSeverity, gotReason string
 		gotEvidence                            map[string]string
 	)
-	err := s.session.Query(
+	err := s.session.QueryContext(ctx,
 		`SELECT id, rule_id, severity, reason, evidence
 		 FROM flagged_events WHERE bucket_hour = ? LIMIT 1`,
 		bucket,

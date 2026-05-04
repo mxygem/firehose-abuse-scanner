@@ -23,6 +23,7 @@ func main() {
 	l.Info("starting firehose abuse scanner")
 
 	cfg := config.MustLoad(os.Getenv("ENV"))
+	l.Info("config", "config", cfg)
 
 	l.Info("starting firehose abuse scanner",
 		"workers", cfg.WorkerCount,
@@ -44,23 +45,30 @@ func main() {
 	)
 	l.Info("firehose client ready", "source", client.Name())
 
-	src, err := client.Subscribe(ctx)
-	if err != nil {
-		l.Error("subscribing to firehose", "error", err)
-		os.Exit(1)
-	}
-
-	store, err := scylla.New(ctx, scylla.Config{
+	store, err := scylla.NewBatched(ctx, scylla.Config{
 		Hosts:       cfg.ScyllaHosts,
 		Keyspace:    cfg.ScyllaKeyspace,
 		Consistency: cfg.ScyllaConsistency,
 		Timeout:     time.Duration(cfg.ScyllaTimeoutMS) * time.Millisecond,
+		NumConns:    cfg.ScyllaNumConns,
+	}, scylla.BatchConfig{
+		MaxSize:        cfg.ScyllaBatchSize,
+		FlushInterval:  time.Duration(cfg.ScyllaBatchFlushMS) * time.Millisecond,
+		FlushWorkers:   cfg.ScyllaBatchFlushWorkers,
+		FlushQueueSize: cfg.ScyllaBatchQueueSize,
+		BufferShards:   cfg.ScyllaBatchShards,
 	})
 	if err != nil {
 		l.Error("creating scylla store", "error", err)
 		os.Exit(1)
 	}
 	defer store.Close()
+
+	src, err := client.Subscribe(ctx)
+	if err != nil {
+		l.Error("subscribing to firehose", "error", err)
+		os.Exit(1)
+	}
 
 	p := pipeline.New(cfg, pipeline.NewScyllaHandler(store))
 	if err := p.Run(ctx, src); err != nil && err != context.Canceled {

@@ -9,5 +9,11 @@
     "scylla_hosts": ["127.0.0.1:9042"],
     "scylla_keyspace": "firehose_scanner",
     "scylla_consistency": "ONE",
-    "scylla_timeout_ms": 5000
+    "scylla_timeout_ms": 5000,
+    "scylla_num_conns": 4,
+    "scylla_batch_size": 100,
+    "scylla_batch_flush_ms": 50,
+    "scylla_batch_flush_workers": 4,
+    "scylla_batch_queue_size": 64,
+    "scylla_batch_shards": 8
 }

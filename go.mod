@@ -3,6 +3,7 @@ module github.com/mxygem/firehose-abuse-scanner
 go 1.26.2
 
 require (
+	github.com/Agent-Plus/gocqlmock v0.0.0-20190823135736-63f5e6494891
 	github.com/gocql/gocql v1.7.0
 	github.com/knadh/koanf/parsers/json v1.0.0
 	github.com/knadh/koanf/providers/file v1.2.1
