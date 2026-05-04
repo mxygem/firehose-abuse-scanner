@@ -2,7 +2,6 @@ package pipeline
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -63,7 +62,7 @@ func (p *Pipeline) Run(ctx context.Context, src <-chan models.FirehoseEvent) err
 			if !ok {
 				close(p.work)
 				p.wg.Wait()
-				return fmt.Errorf("unexpectedly closed source channel found")
+				return nil
 			}
 			atomic.AddUint64(&p.stats.Received, 1)
 			p.enqueue(evt)
@@ -93,6 +92,10 @@ func (p *Pipeline) worker(ctx context.Context) {
 
 	for evt := range p.work {
 		if err := p.handler.Handle(ctx, evt); err != nil {
+			if ctx.Err() != nil {
+				// Context canceled at shutdown; stop quietly.
+				return
+			}
 			atomic.AddUint64(&p.stats.Errors, 1)
 			l.Warn("handling event", "event_id", evt.ID, "error", err)
 			continue

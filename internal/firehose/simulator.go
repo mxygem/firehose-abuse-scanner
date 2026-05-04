@@ -24,16 +24,18 @@ const (
 // Simulator generates realistic-looking AT protocol events locally.
 // It mimics the bursty, high-volume nature of the real Bluesky firehose.
 type Simulator struct {
-	// EventsPerSecond controlsThe target throughput.
+	// EventsPerSecond controls the target throughput.
 	EventsPerSecond int
-	// SimulatorConcurrency the number of goroutines to run concurrently.
+	// SimulatorConcurrency is the number of goroutines to run concurrently.
 	SimulatorConcurrency int
 	// BurstMultiplier briefly spikes throughput to simulate viral moments.
 	BurstMultiplier float64
-	// BurstDuration the duration of the burst.
+	// BurstDuration is the duration of the burst.
 	BurstDuration int
-	// BurstProbability the probability of a burst occurring.
+	// BurstProbability is the probability of a burst occurring.
 	BurstProbability float64
+	// Duration limits how long the simulator runs. Zero means run until ctx is canceled.
+	Duration time.Duration
 }
 
 func NewSimulator(opts ...SimulatorOption) *Simulator {
@@ -84,11 +86,24 @@ func WithBurstProbability(probability float64) SimulatorOption {
 	}
 }
 
+func WithDuration(d time.Duration) SimulatorOption {
+	return func(s *Simulator) {
+		s.Duration = d
+	}
+}
+
 func (s *Simulator) Name() string { return "local-simulator" }
 
 func (s *Simulator) Subscribe(ctx context.Context) (<-chan models.FirehoseEvent, error) {
 	l := slog.Default()
 	ch := make(chan models.FirehoseEvent, min(s.EventsPerSecond, MaxChannelBuffer))
+
+	var cancel context.CancelFunc
+	if s.Duration > 0 {
+		ctx, cancel = context.WithTimeout(ctx, s.Duration)
+	} else {
+		ctx, cancel = context.WithCancel(ctx)
+	}
 
 	l.Info("subscribing to firehose", "events_per_second", s.EventsPerSecond, "burst_duration", s.BurstDuration, "burst_multiplier", s.BurstMultiplier, "simulator_concurrency", s.SimulatorConcurrency)
 
@@ -110,8 +125,6 @@ func (s *Simulator) Subscribe(ctx context.Context) (<-chan models.FirehoseEvent,
 			for {
 				select {
 				case <-ctx.Done():
-					close(ch)
-					wg.Wait()
 					return
 				case <-burstTicker.C:
 					// randomly trigger a burst
@@ -148,9 +161,9 @@ func (s *Simulator) Subscribe(ctx context.Context) (<-chan models.FirehoseEvent,
 		}(i)
 	}
 
-	// Wait for all runners to finish before closing the channel (handled in defer)
 	go func() {
 		wg.Wait()
+		cancel()
 		close(ch)
 	}()
 

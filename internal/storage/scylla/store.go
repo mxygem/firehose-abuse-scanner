@@ -128,30 +128,47 @@ func (s *Store) Close() error {
 	return nil
 }
 
-// bootstrap opens a no-keyspace session, applies every statement in the
-// embedded schema, and closes. The CREATE KEYSPACE has to land before the
-// CREATE TABLEs, but otherwise statement ordering inside schema.cql is
-// preserved.
+// bootstrap applies the embedded schema in two phases:
+//  1. No-keyspace session: runs CREATE KEYSPACE (and skips USE).
+//  2. Keyspace-bound session: runs CREATE TABLE statements.
+//
+// USE statements are skipped because gocql routes queries across a connection
+// pool and each connection tracks its own current keyspace, making USE
+// unreliable. Opening the second session with Keyspace set is the fix.
 func bootstrap(ctx context.Context, cfg Config) error {
-	cluster := newCluster(cfg)
-	// Deliberately leave Keyspace empty — CREATE KEYSPACE has to run before
-	// the session can usefully bind to one.
+	stmts := splitStatements(schemaCQL)
 
-	sess, err := cluster.CreateSession()
+	// Phase 1: CREATE KEYSPACE — no keyspace bound yet.
+	sess, err := newCluster(cfg).CreateSession()
 	if err != nil {
 		return fmt.Errorf("connect: %w", err)
 	}
-	defer sess.Close()
-
-	for _, stmt := range splitStatements(schemaCQL) {
-		// USE statements don't behave reliably across a connection pool —
-		// each conn tracks its own current keyspace. Fully-qualified names
-		// in the CREATE TABLEs would fix this, but the simpler move is to
-		// skip USE here and re-open the working session with Keyspace set.
+	var tableStmts []string
+	for _, stmt := range stmts {
 		if isUseStatement(stmt) {
 			continue
 		}
-		if err := sess.Query(stmt).WithContext(ctx).Exec(); err != nil {
+		if strings.HasPrefix(strings.ToUpper(stmt), "CREATE KEYSPACE") {
+			if err := sess.Query(stmt).WithContext(ctx).Exec(); err != nil {
+				sess.Close()
+				return fmt.Errorf("apply statement: %w\n%s", err, stmt)
+			}
+		} else {
+			tableStmts = append(tableStmts, stmt)
+		}
+	}
+	sess.Close()
+
+	// Phase 2: CREATE TABLE — session bound to the keyspace.
+	cluster := newCluster(cfg)
+	cluster.Keyspace = cfg.Keyspace
+	sess2, err := cluster.CreateSession()
+	if err != nil {
+		return fmt.Errorf("connect with keyspace: %w", err)
+	}
+	defer sess2.Close()
+	for _, stmt := range tableStmts {
+		if err := sess2.Query(stmt).WithContext(ctx).Exec(); err != nil {
 			return fmt.Errorf("apply statement: %w\n%s", err, stmt)
 		}
 	}
@@ -180,18 +197,21 @@ func newCluster(cfg Config) *gocql.ClusterConfig {
 // split is sufficient. If that ever changes, swap this for a proper
 // tokenizer.
 func splitStatements(s string) []string {
-	parts := strings.Split(s, ";")
+	// Strip line comments before splitting on ";", so a semicolon inside a
+	// comment (e.g. "-- foo; bar") never produces a spurious empty statement.
+	var b strings.Builder
+	for line := range strings.SplitSeq(s, "\n") {
+		if idx := strings.Index(line, "--"); idx >= 0 {
+			line = line[:idx]
+		}
+		b.WriteString(line)
+		b.WriteByte('\n')
+	}
+
+	parts := strings.Split(b.String(), ";")
 	out := make([]string, 0, len(parts))
 	for _, p := range parts {
-		var lines []string
-		for line := range strings.SplitSeq(p, "\n") {
-			if idx := strings.Index(line, "--"); idx >= 0 {
-				line = line[:idx]
-			}
-			lines = append(lines, line)
-		}
-		cleaned := strings.TrimSpace(strings.Join(lines, "\n"))
-		if cleaned != "" {
+		if cleaned := strings.TrimSpace(p); cleaned != "" {
 			out = append(out, cleaned)
 		}
 	}

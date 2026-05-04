@@ -6,6 +6,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/knadh/koanf/parsers/json"
 	"github.com/knadh/koanf/providers/file"
@@ -43,6 +44,7 @@ type Config struct {
 	BurstMultiplier      float64
 	BurstDuration        int
 	SimulatorConcurrency int
+	SimulatorDuration    time.Duration
 }
 
 func MustLoad(env string) *Config {
@@ -129,6 +131,13 @@ func MustLoad(env string) *Config {
 			panic(fmt.Errorf("invalid BURST_DURATION: %v", err))
 		}
 		cfg.BurstDuration = duration
+	}
+	if v := os.Getenv("SIMULATOR_DURATION"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			panic(fmt.Errorf("invalid SIMULATOR_DURATION: %v", err))
+		}
+		cfg.SimulatorDuration = d
 	}
 
 	if v := os.Getenv("POSTGRES_DSN"); v != "" {

@@ -6,10 +6,12 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/mxygem/firehose-abuse-scanner/internal/config"
 	"github.com/mxygem/firehose-abuse-scanner/internal/firehose"
 	"github.com/mxygem/firehose-abuse-scanner/internal/pipeline"
+	"github.com/mxygem/firehose-abuse-scanner/internal/storage/scylla"
 )
 
 func main() {
@@ -38,18 +40,29 @@ func main() {
 		firehose.WithBurstMultiplier(cfg.BurstMultiplier),
 		firehose.WithBurstDuration(cfg.BurstDuration),
 		firehose.WithConcurrency(cfg.SimulatorConcurrency),
+		firehose.WithDuration(cfg.SimulatorDuration),
 	)
 	l.Info("firehose client ready", "source", client.Name())
 
 	src, err := client.Subscribe(ctx)
 	if err != nil {
-		l.Error("subscribining to firehose", "error", err)
+		l.Error("subscribing to firehose", "error", err)
 		os.Exit(1)
 	}
 
-	handler := &pipeline.LogHandler{}
+	store, err := scylla.New(ctx, scylla.Config{
+		Hosts:       cfg.ScyllaHosts,
+		Keyspace:    cfg.ScyllaKeyspace,
+		Consistency: cfg.ScyllaConsistency,
+		Timeout:     time.Duration(cfg.ScyllaTimeoutMS) * time.Millisecond,
+	})
+	if err != nil {
+		l.Error("creating scylla store", "error", err)
+		os.Exit(1)
+	}
+	defer store.Close()
 
-	p := pipeline.New(cfg, handler)
+	p := pipeline.New(cfg, pipeline.NewScyllaHandler(store))
 	if err := p.Run(ctx, src); err != nil && err != context.Canceled {
 		l.Error("pipeline exited with error", "error", err)
 		os.Exit(1)
