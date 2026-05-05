@@ -2,6 +2,8 @@ module github.com/mxygem/firehose-abuse-scanner
 
 go 1.26.2
 
+replace github.com/gocql/gocql => github.com/scylladb/gocql v1.14.4
+
 require (
 	github.com/Agent-Plus/gocqlmock v0.0.0-20190823135736-63f5e6494891
 	github.com/gocql/gocql v1.7.0

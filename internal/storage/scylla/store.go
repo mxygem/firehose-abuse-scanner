@@ -181,6 +181,11 @@ func newCluster(cfg Config) *gocql.ClusterConfig {
 	// avoids gocql's startup-time protocol discovery, which can fail while
 	// a single-node dev container is still warming up.
 	cluster.ProtoVersion = 4
+	// Token-aware routing sends each query directly to a replica that owns
+	// the partition, skipping a coordinator hop. With the scylladb/gocql
+	// fork (wired via go.mod replace) this also picks the correct shard on
+	// that replica, which is the dominant write-throughput lever on Scylla.
+	cluster.PoolConfig.HostSelectionPolicy = gocql.TokenAwareHostPolicy(gocql.RoundRobinHostPolicy())
 	if cfg.Timeout > 0 {
 		cluster.Timeout = cfg.Timeout
 		cluster.ConnectTimeout = cfg.Timeout

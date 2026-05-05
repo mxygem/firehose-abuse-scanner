@@ -16,15 +16,15 @@ run-timed duration:
 
 # run the scanner with high-throughput drop config
 run-stress:
-    BACKPRESSURE_MODE=drop WORKER_COUNT=100 EVENTS_PER_SECOND=1000000 SIMULATOR_CONCURRENCY=20 SCYLLA_NUM_CONNS=8 SCYLLA_BATCH_FLUSH_WORKERS=8 SCYLLA_BATCH_QUEUE_SIZE=256 go run ./cmd/scanner
+    BACKPRESSURE_MODE=drop WORKER_COUNT=100 EVENTS_PER_SECOND=1000000 SIMULATOR_CONCURRENCY=20 SCYLLA_NUM_CONNS=8 SCYLLA_BATCH_FLUSH_WORKERS=8 SCYLLA_BATCH_QUEUE_SIZE=256 SIMULATOR_DURATION=60s go run ./cmd/scanner
 
-# run the scanner with tuned Scylla concurrency baseline (30s)
+# run the scanner with tuned Scylla concurrency baseline (60s)
 run-stress-02:
-    BACKPRESSURE_MODE=drop WORKER_COUNT=100 EVENTS_PER_SECOND=1000000 SIMULATOR_CONCURRENCY=20 SCYLLA_NUM_CONNS=32 SCYLLA_BATCH_FLUSH_WORKERS=32 SCYLLA_BATCH_QUEUE_SIZE=2048 SCYLLA_BATCH_SIZE=200 SCYLLA_BATCH_SHARDS=64 SIMULATOR_DURATION=30s go run ./cmd/scanner
+    BACKPRESSURE_MODE=drop WORKER_COUNT=100 EVENTS_PER_SECOND=1000000 SIMULATOR_CONCURRENCY=20 SCYLLA_NUM_CONNS=32 SCYLLA_BATCH_FLUSH_WORKERS=32 SCYLLA_BATCH_QUEUE_SIZE=2048 SCYLLA_BATCH_SIZE=200 SCYLLA_BATCH_SHARDS=64 SIMULATOR_DURATION=60s go run ./cmd/scanner
 
-# run the scanner with max-throughput profile from sweep (30s)
+# run the scanner with max-throughput profile from sweep (60s)
 run-stress-max:
-    BACKPRESSURE_MODE=drop WORKER_COUNT=100 EVENTS_PER_SECOND=1000000 SIMULATOR_CONCURRENCY=20 SCYLLA_NUM_CONNS=64 SCYLLA_BATCH_FLUSH_WORKERS=64 SCYLLA_BATCH_QUEUE_SIZE=4096 SCYLLA_BATCH_SIZE=400 SCYLLA_BATCH_SHARDS=128 SIMULATOR_DURATION=30s go run ./cmd/scanner
+    BACKPRESSURE_MODE=drop WORKER_COUNT=100 EVENTS_PER_SECOND=1000000 SIMULATOR_CONCURRENCY=20 SCYLLA_NUM_CONNS=64 SCYLLA_BATCH_FLUSH_WORKERS=64 SCYLLA_BATCH_QUEUE_SIZE=4096 SCYLLA_BATCH_SIZE=400 SCYLLA_BATCH_SHARDS=128 SIMULATOR_DURATION=60s go run ./cmd/scanner
 
 # build the scanner binary
 build:
@@ -65,14 +65,20 @@ scylla-start:
     docker run --name some-scylla --hostname some-scylla -p 9042:9042 -d scylladb/scylla \
         --developer-mode=1 --overprovisioned=1 --smp=1 --memory=1G --reserve-memory=0M
 
-# add a second Scylla node and seed it from the first (forms a 2-node cluster)
+# add the next Scylla node and seed it from the first
 scylla-add-node:
-    @echo "Waiting for seed node (some-scylla) to be ready..."
-    @until docker exec some-scylla nodetool status 2>/dev/null | grep -q "^UN"; do sleep 5; done
-    @echo "Seed node is ready. Starting second node..."
-    docker run --name some-scylla2 --hostname some-scylla2 -d scylladb/scylla \
-        --developer-mode=1 --overprovisioned=1 --smp=1 --memory=1G --reserve-memory=0M \
-        --seeds="$(docker inspect some-scylla | python3 -c 'import json,sys; obj=json.load(sys.stdin)[0]; nets=obj["NetworkSettings"]["Networks"]; print(next(iter(nets.values()))["IPAddress"])' | tr -d '\n')"
+    @set -eu; \
+        echo "Waiting for seed node (some-scylla) to be ready..."; \
+        until docker exec some-scylla nodetool status 2>/dev/null | grep -q "^UN"; do sleep 5; done; \
+        next_node_num=$(docker ps -a --filter "name=^/some-scylla[0-9]*$" --no-trunc | awk 'NR > 1 {print $NF}' | sed -n 's/^some-scylla$/1/p; s/^some-scylla\([0-9][0-9]*\)$/\1/p' | sort -n | awk 'END {print}'); \
+        if [ -z "$next_node_num" ]; then echo "No seed container named some-scylla found."; exit 1; fi; \
+        next_node_num=$((next_node_num + 1)); \
+        node_name="some-scylla${next_node_num}"; \
+        seed_ip="$(docker inspect some-scylla | python3 -c 'import json,sys; obj=json.load(sys.stdin)[0]; nets=obj["NetworkSettings"]["Networks"]; print(next(iter(nets.values()))["IPAddress"])' | tr -d '\n')"; \
+        echo "Seed node is ready. Starting ${node_name}..."; \
+        docker run --name "$node_name" --hostname "$node_name" -d scylladb/scylla \
+            --developer-mode=1 --overprovisioned=1 --smp=1 --memory=1G --reserve-memory=0M \
+            --seeds="$seed_ip"
 
 # check cluster status via nodetool
 scylla-status:
