@@ -107,3 +107,21 @@ scylla-shell:
 # stop and remove standalone Scylla containers
 scylla-stop:
     docker rm -f some-scylla some-scylla2 2>/dev/null || true
+
+# ── Observability — Prometheus + Grafana via docker-compose ───────────────────
+
+# bring up Prometheus (localhost:9091) + Grafana (localhost:3000); scrapes scanner on host:9090
+o11y-up:
+    docker compose up -d prometheus grafana
+
+# tear down the o11y stack (data volumes preserved)
+o11y-down:
+    docker compose down
+
+# tear down the o11y stack and wipe its data volumes
+o11y-wipe:
+    docker compose down -v
+
+# tail Prometheus + Grafana logs
+o11y-logs:
+    docker compose logs -f prometheus grafana

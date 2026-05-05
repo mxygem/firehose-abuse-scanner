@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/mxygem/firehose-abuse-scanner/internal/config"
+	"github.com/mxygem/firehose-abuse-scanner/internal/metrics"
 	"github.com/mxygem/firehose-abuse-scanner/internal/models"
 )
 
@@ -41,6 +42,8 @@ func New(cfg *config.Config, handler Handler) *Pipeline {
 }
 
 func (p *Pipeline) Run(ctx context.Context, src <-chan models.FirehoseEvent) error {
+	metrics.QueueCapacity.Set(float64(cap(p.work)))
+
 	// Spin up the worker pool.
 	for range p.cfg.WorkerCount {
 		p.wg.Add(1)
@@ -65,6 +68,7 @@ func (p *Pipeline) Run(ctx context.Context, src <-chan models.FirehoseEvent) err
 				return nil
 			}
 			atomic.AddUint64(&p.stats.Received, 1)
+			metrics.EventsReceived.Inc()
 			p.enqueue(evt)
 		}
 	}
@@ -78,6 +82,7 @@ func (p *Pipeline) enqueue(evt models.FirehoseEvent) {
 		default:
 			// Queue is full, drop the event and record it.
 			atomic.AddUint64(&p.stats.Dropped, 1)
+			metrics.EventsDropped.Inc()
 		}
 	case config.ModeBlock:
 		// Block the ingestion goroutine until a worker slot opens.
@@ -91,17 +96,22 @@ func (p *Pipeline) worker(ctx context.Context) {
 	defer p.wg.Done()
 
 	for evt := range p.work {
-		if err := p.handler.Handle(ctx, evt); err != nil {
+		start := time.Now()
+		err := p.handler.Handle(ctx, evt)
+		metrics.ProcessingDuration.Observe(time.Since(start).Seconds())
+		if err != nil {
 			if ctx.Err() != nil {
 				// Context canceled at shutdown; stop quietly.
 				return
 			}
 			atomic.AddUint64(&p.stats.Errors, 1)
+			metrics.EventErrors.Inc()
 			l.Warn("handling event", "event_id", evt.ID, "error", err)
 			continue
 		}
 
 		atomic.AddUint64(&p.stats.Processed, 1)
+		metrics.EventsProcessed.Inc()
 	}
 }
 
@@ -123,6 +133,13 @@ func (p *Pipeline) reportStats(ctx context.Context) {
 			dropped := atomic.LoadUint64(&p.stats.Dropped)
 			errors := atomic.LoadUint64(&p.stats.Errors)
 
+			depth := len(p.work)
+			capacity := cap(p.work)
+			metrics.QueueDepth.Set(float64(depth))
+			if capacity > 0 {
+				metrics.QueueSaturation.Set(float64(depth) / float64(capacity))
+			}
+
 			deltaRec := received - lastReceived
 			deltaProc := processed - lastProcessed
 			deltaDrop := dropped - lastDropped
@@ -135,8 +152,8 @@ func (p *Pipeline) reportStats(ctx context.Context) {
 				"total_proc", processed,
 				"total_drop", dropped,
 				"total_errors", errors,
-				"queue_depth", len(p.work),
-				"queue_cap", cap(p.work),
+				"queue_depth", depth,
+				"queue_cap", capacity,
 			)
 
 			lastReceived = received

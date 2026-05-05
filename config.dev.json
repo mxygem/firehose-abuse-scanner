@@ -15,5 +15,6 @@
     "scylla_batch_flush_ms": 50,
     "scylla_batch_flush_workers": 4,
     "scylla_batch_queue_size": 64,
-    "scylla_batch_shards": 8
+    "scylla_batch_shards": 8,
+    "metrics_addr": ":9090"
 }
