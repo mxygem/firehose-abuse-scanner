@@ -95,7 +95,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	p := pipeline.New(cfg, pipeline.NewScyllaHandler(store))
+	scheduler := pipeline.NewParallelScheduler(cfg, pipeline.NewScyllaHandler(store))
+	p := pipeline.New(cfg, scheduler)
 	if err := p.Run(ctx, src); err != nil && err != context.Canceled {
 		l.Error("pipeline exited with error", "error", err)
 		os.Exit(1)

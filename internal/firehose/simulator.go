@@ -19,6 +19,12 @@ const (
 	DefaultEventsPerSecond      = 1000
 	DefaultBurstProbability     = 0.3
 	MaxChannelBuffer            = 10000
+
+	// didCardinality controls how many distinct synthetic authors the
+	// simulator generates. Sized to give per-DID-affinity schedulers enough
+	// fan-out to keep every worker busy at the worker counts we benchmark
+	// (up to a few hundred).
+	didCardinality = 5000
 )
 
 // Simulator generates realistic-looking AT protocol events locally.
@@ -212,7 +218,7 @@ func generateEvent(t time.Time) models.FirehoseEvent {
 
 	evt := models.FirehoseEvent{
 		ID:         fmt.Sprintf("evt-%d", id),
-		DID:        fmt.Sprintf("did:plc:%016x", rand.Int64N(16)),
+		DID:        fmt.Sprintf("did:plc:%016x", rand.Int64N(didCardinality)),
 		Kind:       kind,
 		CreatedAt:  t,
 		ReceivedAt: time.Now(),

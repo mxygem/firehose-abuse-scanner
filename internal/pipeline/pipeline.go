@@ -2,8 +2,8 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"log/slog"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -12,11 +12,16 @@ import (
 	"github.com/mxygem/firehose-abuse-scanner/internal/models"
 )
 
+// Handler runs the per-event work (typically: persist to storage, run
+// detectors). One Handler instance is shared across all scheduler workers, so
+// implementations must be safe for concurrent use.
 type Handler interface {
 	Handle(ctx context.Context, event models.FirehoseEvent) error
 }
 
-// stats holds live pipeline counters. All fields are updated atomically.
+// Stats is a point-in-time snapshot of the pipeline's counters. Received is
+// owned by the pipeline (counted at source-read time); the rest come from the
+// scheduler.
 type Stats struct {
 	Received  uint64
 	Processed uint64
@@ -24,94 +29,74 @@ type Stats struct {
 	Errors    uint64
 }
 
+// Pipeline reads events off a firehose source and dispatches them to a
+// Scheduler. The scheduler owns the worker pool, per-DID affinity, and
+// backpressure; the pipeline is just the source loop plus the stats reporter.
 type Pipeline struct {
-	cfg     *config.Config
-	handler Handler
-	stats   Stats
+	cfg       *config.Config
+	scheduler Scheduler
 
-	work chan models.FirehoseEvent
-	wg   sync.WaitGroup
+	received uint64
 }
 
-func New(cfg *config.Config, handler Handler) *Pipeline {
+func New(cfg *config.Config, scheduler Scheduler) *Pipeline {
 	return &Pipeline{
-		cfg:     cfg,
-		handler: handler,
-		work:    make(chan models.FirehoseEvent, cfg.ChannelBuffer),
+		cfg:       cfg,
+		scheduler: scheduler,
 	}
 }
 
+// Run starts the scheduler's workers, then fans events from src into
+// scheduler.AddWork until ctx is canceled or src closes. On exit it shuts the
+// scheduler down with a bounded grace period so already-buffered work drains.
 func (p *Pipeline) Run(ctx context.Context, src <-chan models.FirehoseEvent) error {
-	metrics.QueueCapacity.Set(float64(cap(p.work)))
+	p.scheduler.Start(ctx)
+	metrics.QueueCapacity.Set(float64(p.scheduler.QueueCapacity()))
 
-	// Spin up the worker pool.
-	for range p.cfg.WorkerCount {
-		p.wg.Add(1)
-		go p.worker(ctx)
+	statsCtx, stopStats := context.WithCancel(ctx)
+	defer stopStats()
+	go p.reportStats(statsCtx)
+
+	srcErr := p.runSource(ctx, src)
+
+	stopStats()
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := p.scheduler.Shutdown(shutdownCtx); err != nil {
+		slog.Default().Warn("scheduler shutdown", "error", err)
 	}
 
-	// Start the stats reporter.
-	go p.reportStats(ctx)
+	return srcErr
+}
 
-	// Fan events from the firehose channel into the work queue.
+// runSource is the read loop. It returns when ctx is canceled or src closes.
+// It does not stop the scheduler — Run does that after this returns.
+func (p *Pipeline) runSource(ctx context.Context, src <-chan models.FirehoseEvent) error {
 	for {
 		select {
 		case <-ctx.Done():
-			// Stop accepting new events, drain the work queue, then shut down workers.
-			close(p.work)
-			p.wg.Wait()
 			return ctx.Err()
 		case evt, ok := <-src:
 			if !ok {
-				close(p.work)
-				p.wg.Wait()
 				return nil
 			}
-			atomic.AddUint64(&p.stats.Received, 1)
+			atomic.AddUint64(&p.received, 1)
 			metrics.EventsReceived.Inc()
-			p.enqueue(evt)
-		}
-	}
-}
 
-func (p *Pipeline) enqueue(evt models.FirehoseEvent) {
-	switch p.cfg.BackpressureMode {
-	case config.ModeDrop:
-		select {
-		case p.work <- evt:
-		default:
-			// Queue is full, drop the event and record it.
-			atomic.AddUint64(&p.stats.Dropped, 1)
-			metrics.EventsDropped.Inc()
-		}
-	case config.ModeBlock:
-		// Block the ingestion goroutine until a worker slot opens.
-		p.work <- evt
-	}
-}
-
-// worker pulls events off the queue and calls the handler.
-func (p *Pipeline) worker(ctx context.Context) {
-	l := slog.Default()
-	defer p.wg.Done()
-
-	for evt := range p.work {
-		start := time.Now()
-		err := p.handler.Handle(ctx, evt)
-		metrics.ProcessingDuration.Observe(time.Since(start).Seconds())
-		if err != nil {
-			if ctx.Err() != nil {
-				// Context canceled at shutdown; stop quietly.
-				return
+			if err := p.scheduler.AddWork(ctx, evt.DID, evt); err != nil {
+				if errors.Is(err, ErrDropped) {
+					// Already counted by the scheduler.
+					continue
+				}
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				// Unexpected scheduler error: log and continue rather than
+				// killing the pipeline over one event.
+				slog.Default().Warn("scheduler add work", "event_id", evt.ID, "error", err)
 			}
-			atomic.AddUint64(&p.stats.Errors, 1)
-			metrics.EventErrors.Inc()
-			l.Warn("handling event", "event_id", evt.ID, "error", err)
-			continue
 		}
-
-		atomic.AddUint64(&p.stats.Processed, 1)
-		metrics.EventsProcessed.Inc()
 	}
 }
 
@@ -128,47 +113,46 @@ func (p *Pipeline) reportStats(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			received := atomic.LoadUint64(&p.stats.Received)
-			processed := atomic.LoadUint64(&p.stats.Processed)
-			dropped := atomic.LoadUint64(&p.stats.Dropped)
-			errors := atomic.LoadUint64(&p.stats.Errors)
+			snap := p.Snapshot()
 
-			depth := len(p.work)
-			capacity := cap(p.work)
+			depth := p.scheduler.QueueDepth()
+			capacity := p.scheduler.QueueCapacity()
 			metrics.QueueDepth.Set(float64(depth))
 			if capacity > 0 {
 				metrics.QueueSaturation.Set(float64(depth) / float64(capacity))
 			}
 
-			deltaRec := received - lastReceived
-			deltaProc := processed - lastProcessed
-			deltaDrop := dropped - lastDropped
+			deltaRec := snap.Received - lastReceived
+			deltaProc := snap.Processed - lastProcessed
+			deltaDrop := snap.Dropped - lastDropped
 
 			l.Info("pipeline stats",
 				"recv/sec", deltaRec/5,
 				"proc/sec", deltaProc/5,
 				"drop/sec", deltaDrop/5,
-				"total_recv", received,
-				"total_proc", processed,
-				"total_drop", dropped,
-				"total_errors", errors,
+				"total_recv", snap.Received,
+				"total_proc", snap.Processed,
+				"total_drop", snap.Dropped,
+				"total_errors", snap.Errors,
 				"queue_depth", depth,
 				"queue_cap", capacity,
 			)
 
-			lastReceived = received
-			lastProcessed = processed
-			lastDropped = dropped
+			lastReceived = snap.Received
+			lastProcessed = snap.Processed
+			lastDropped = snap.Dropped
 		}
 	}
 }
 
-// Snapshot returns a point-in-time copy of the current stats.
+// Snapshot returns a point-in-time copy of the pipeline's counters, merging
+// pipeline-side Received with scheduler-side Processed/Dropped/Errors.
 func (p *Pipeline) Snapshot() Stats {
+	s := p.scheduler.Stats()
 	return Stats{
-		Received:  atomic.LoadUint64(&p.stats.Received),
-		Processed: atomic.LoadUint64(&p.stats.Processed),
-		Dropped:   atomic.LoadUint64(&p.stats.Dropped),
-		Errors:    atomic.LoadUint64(&p.stats.Errors),
+		Received:  atomic.LoadUint64(&p.received),
+		Processed: s.Processed,
+		Dropped:   s.Dropped,
+		Errors:    s.Errors,
 	}
 }

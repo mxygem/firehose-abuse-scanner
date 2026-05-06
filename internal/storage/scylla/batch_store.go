@@ -2,11 +2,12 @@ package scylla
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"hash/maphash"
 	"log/slog"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/gocql/gocql"
@@ -29,12 +30,27 @@ type BatchConfig struct {
 	// FlushQueueSize is the max number of full event-batches waiting to flush.
 	FlushQueueSize int
 	// BufferShards is the number of independent in-memory buffers used to
-	// reduce lock contention on InsertEvent.
+	// reduce lock contention. The same count is used for each table — events
+	// are routed to a shard by hashing that table's partition key, so events
+	// for the same partition always co-locate in one shard and emitted
+	// batches stay partition-coalesced. This is what lets the shard-aware
+	// gocql fork actually route batches to a single Scylla shard.
 	BufferShards int
 }
 
 // BatchStore buffers InsertEvent calls and flushes them as UNLOGGED BATCHes,
 // reducing round-trips to Scylla at the cost of a short write-delay window.
+//
+// Each event becomes two writes — one per query-driven view — but they are
+// buffered separately and emitted as table-homogeneous batches:
+//   - events_by_did: shard = hash(did) % N
+//   - events_by_minute: shard = hash(kind, bucket_minute) % N
+//
+// Co-locating events for the same partition key in the same shard keeps each
+// flushed batch partition-coalesced. Combined with token-aware routing in the
+// scylladb/gocql fork this lets the driver send the batch directly to the
+// owning Scylla shard, which is the dominant write-throughput lever.
+//
 // InsertFlagged is unbatched — abuse hits are rare and should land promptly.
 type BatchStore struct {
 	session       *gocql.Session
@@ -45,10 +61,12 @@ type BatchStore struct {
 
 	closeMu sync.RWMutex
 	closed  bool
-	shardRR uint64
-	shards  []batchBuffer
 
-	flushCh chan []models.FirehoseEvent
+	seed         maphash.Seed
+	didShards    []batchBuffer
+	minuteShards []batchBuffer
+
+	flushCh chan batchJob
 	stopCh  chan struct{}
 	doneCh  chan struct{}
 	wg      sync.WaitGroup
@@ -57,6 +75,20 @@ type BatchStore struct {
 type batchBuffer struct {
 	mu  sync.Mutex
 	buf []models.FirehoseEvent
+}
+
+// batchTarget identifies which view a batch of events belongs to.
+type batchTarget int
+
+const (
+	targetByDID batchTarget = iota
+	targetByMinute
+)
+
+// batchJob is one homogeneous batch ready to flush.
+type batchJob struct {
+	target batchTarget
+	events []models.FirehoseEvent
 }
 
 var errBatchStoreClosed = errors.New("batch store is closed")
@@ -114,13 +146,16 @@ func NewBatched(ctx context.Context, cfg Config, bcfg BatchConfig) (*BatchStore,
 		maxSize:       maxSize,
 		flushInterval: flushInterval,
 		flushWorkers:  flushWorkers,
-		shards:        make([]batchBuffer, bufferShards),
-		flushCh:       make(chan []models.FirehoseEvent, flushQueueSize),
+		seed:          maphash.MakeSeed(),
+		didShards:     make([]batchBuffer, bufferShards),
+		minuteShards:  make([]batchBuffer, bufferShards),
+		flushCh:       make(chan batchJob, flushQueueSize),
 		stopCh:        make(chan struct{}),
 		doneCh:        make(chan struct{}),
 	}
-	for i := range bs.shards {
-		bs.shards[i].buf = make([]models.FirehoseEvent, 0, maxSize)
+	for i := range bs.didShards {
+		bs.didShards[i].buf = make([]models.FirehoseEvent, 0, maxSize)
+		bs.minuteShards[i].buf = make([]models.FirehoseEvent, 0, maxSize)
 	}
 
 	for i := 0; i < bs.flushWorkers; i++ {
@@ -132,27 +167,56 @@ func NewBatched(ctx context.Context, cfg Config, bcfg BatchConfig) (*BatchStore,
 	return bs, nil
 }
 
-// InsertEvent buffers the event and flushes immediately if the buffer is full.
-// The caller's context is intentionally not forwarded to the flush: a shutdown
-// signal must not abort a flush that's already holding buffered data.
+// InsertEvent buffers the event for both views and flushes whichever shard
+// fills first. The caller's context is intentionally not forwarded to the
+// flush: a shutdown signal must not abort a flush that's already holding
+// buffered data.
 func (s *BatchStore) InsertEvent(_ context.Context, e models.FirehoseEvent) error {
 	s.closeMu.RLock()
+	defer s.closeMu.RUnlock()
 	if s.closed {
-		s.closeMu.RUnlock()
 		return errBatchStoreClosed
 	}
-	idx := int(atomic.AddUint64(&s.shardRR, 1)-1) % len(s.shards)
-	events := s.appendToShard(idx, e)
-	if err := s.enqueue(events); err != nil {
-		s.closeMu.RUnlock()
-		return err
+
+	didIdx := s.shardForDID(e.DID)
+	if events := s.appendShard(&s.didShards[didIdx], e); events != nil {
+		s.enqueue(batchJob{target: targetByDID, events: events})
 	}
-	s.closeMu.RUnlock()
+
+	minuteIdx := s.shardForMinute(e.Kind, e.ReceivedAt.Truncate(time.Minute))
+	if events := s.appendShard(&s.minuteShards[minuteIdx], e); events != nil {
+		s.enqueue(batchJob{target: targetByMinute, events: events})
+	}
 	return nil
 }
 
-func (s *BatchStore) appendToShard(idx int, e models.FirehoseEvent) []models.FirehoseEvent {
-	shard := &s.shards[idx]
+// shardForDID routes events_by_did writes by their partition key (DID).
+// Events for the same author always land in the same shard, so an emitted
+// batch's rows share a partition (or at most a small set) and the
+// shard-aware driver can route the batch to one Scylla shard.
+func (s *BatchStore) shardForDID(did string) int {
+	var h maphash.Hash
+	h.SetSeed(s.seed)
+	h.WriteString(did)
+	return int(h.Sum64() % uint64(len(s.didShards)))
+}
+
+// shardForMinute routes events_by_minute writes by their partition key
+// (kind, bucket_minute). Same idea as shardForDID — keep partition-mates
+// together so the eventually-flushed batch is partition-coalesced.
+func (s *BatchStore) shardForMinute(kind models.EventKind, bucket time.Time) int {
+	var h maphash.Hash
+	h.SetSeed(s.seed)
+	h.WriteString(string(kind))
+	var b [8]byte
+	binary.LittleEndian.PutUint64(b[:], uint64(bucket.UnixNano()))
+	_, _ = h.Write(b[:])
+	return int(h.Sum64() % uint64(len(s.minuteShards)))
+}
+
+// appendShard adds e to a shard buffer. Returns the buffer's contents (and
+// resets it) when the shard hits MaxSize, otherwise returns nil.
+func (s *BatchStore) appendShard(shard *batchBuffer, e models.FirehoseEvent) []models.FirehoseEvent {
 	shard.mu.Lock()
 	defer shard.mu.Unlock()
 	shard.buf = append(shard.buf, e)
@@ -219,25 +283,30 @@ func (s *BatchStore) flusher() {
 
 func (s *BatchStore) flushWorker() {
 	defer s.wg.Done()
-	for events := range s.flushCh {
-		if err := s.executeBatch(events); err != nil {
-			s.l.Warn("execute event batch", "events", len(events), "error", err)
+	for job := range s.flushCh {
+		if err := s.executeBatch(job); err != nil {
+			s.l.Warn("execute event batch", "target", job.target, "events", len(job.events), "error", err)
 		}
 	}
 }
 
-// flushAllShards swaps out shard buffers and enqueues non-empty batches.
+// flushAllShards swaps every shard buffer (for both views) and enqueues
+// non-empty batches.
 func (s *BatchStore) flushAllShards() error {
-	for idx := range s.shards {
-		if err := s.enqueue(s.swapShardBuffer(idx)); err != nil {
-			return err
+	for i := range s.didShards {
+		if events := s.swapShardBuffer(&s.didShards[i]); events != nil {
+			s.enqueue(batchJob{target: targetByDID, events: events})
+		}
+	}
+	for i := range s.minuteShards {
+		if events := s.swapShardBuffer(&s.minuteShards[i]); events != nil {
+			s.enqueue(batchJob{target: targetByMinute, events: events})
 		}
 	}
 	return nil
 }
 
-func (s *BatchStore) swapShardBuffer(idx int) []models.FirehoseEvent {
-	shard := &s.shards[idx]
+func (s *BatchStore) swapShardBuffer(shard *batchBuffer) []models.FirehoseEvent {
 	shard.mu.Lock()
 	defer shard.mu.Unlock()
 	if len(shard.buf) == 0 {
@@ -248,26 +317,37 @@ func (s *BatchStore) swapShardBuffer(idx int) []models.FirehoseEvent {
 	return events
 }
 
-func (s *BatchStore) enqueue(events []models.FirehoseEvent) error {
-	if len(events) == 0 {
-		return nil
+func (s *BatchStore) enqueue(job batchJob) {
+	if len(job.events) == 0 {
+		return
 	}
-	s.flushCh <- events
-	return nil
+	s.flushCh <- job
 }
 
-func (s *BatchStore) executeBatch(events []models.FirehoseEvent) error {
+// executeBatch turns one batchJob into a single UNLOGGED BATCH targeting one
+// table. Keeping each batch homogeneous (one statement template, one
+// partition-keyed routing decision) is what makes shard-aware routing pay
+// off — a multi-statement batch would force coordinator fan-out.
+func (s *BatchStore) executeBatch(job batchJob) error {
 	batch := s.session.NewBatch(gocql.UnloggedBatch)
-	for _, e := range events {
-		bucketMinute := e.ReceivedAt.Truncate(time.Minute)
-		batch.Query(insertEventByDIDStmt,
-			e.DID, e.ReceivedAt, e.ID, string(e.Kind), e.Text, e.Langs, e.Links, e.CreatedAt)
-		batch.Query(insertEventByMinuteStmt,
-			string(e.Kind), bucketMinute, e.ReceivedAt, e.ID, e.DID, e.Text, e.Langs, e.Links, e.CreatedAt)
+	switch job.target {
+	case targetByDID:
+		for _, e := range job.events {
+			batch.Query(insertEventByDIDStmt,
+				e.DID, e.ReceivedAt, e.ID, string(e.Kind), e.Text, e.Langs, e.Links, e.CreatedAt)
+		}
+	case targetByMinute:
+		for _, e := range job.events {
+			bucketMinute := e.ReceivedAt.Truncate(time.Minute)
+			batch.Query(insertEventByMinuteStmt,
+				string(e.Kind), bucketMinute, e.ReceivedAt, e.ID, e.DID, e.Text, e.Langs, e.Links, e.CreatedAt)
+		}
+	default:
+		return fmt.Errorf("unknown batch target: %d", job.target)
 	}
 
 	if err := s.session.ExecuteBatch(batch.WithContext(context.Background())); err != nil {
-		return fmt.Errorf("execute batch (%d events): %w", len(events), err)
+		return fmt.Errorf("execute batch (target=%d, events=%d): %w", job.target, len(job.events), err)
 	}
 	return nil
 }
