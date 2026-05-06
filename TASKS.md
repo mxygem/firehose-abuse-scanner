@@ -27,15 +27,15 @@ Goal: a running Scylla node and a handler that durably writes every event the pi
   - Connection config (hosts, keyspace, consistency, timeout) added to `Config` and `config.*.json`.
   - Use prepared statements; reuse a single session.
 
-- [ ] **1.4 ScyllaHandler**
+- [X] **1.4 ScyllaHandler**
   - Implements `pipeline.Handler`, replacing `LogHandler` as the default in `cmd/scanner/main.go`.
   - Writes each event to `events_by_did` and `events_by_minute`.
   - Returns an error (pipeline already counts these) — no retry yet.
 
-- [ ] **1.5 Batched writer (perf lever)**
+- [X] **1.5 Batched writer (perf lever)**
   - Add an in-memory write buffer per worker that flushes by size (e.g. 100) or interval (e.g. 50ms) using `UNLOGGED BATCH` keyed by partition.
   - Make the batch size + flush interval configurable so the demo can show the throughput curve.
-  - Compare batched vs. single-insert numbers in the README.
+  - Compare batched vs. single-insert numbers in the README. *(deferred to 4.3 — depends on benchmark mode in 4.1)*
 
 ---
 
@@ -103,8 +103,8 @@ Goal: numbers to point at. This is the headline of the demo.
   - Architecture diagram updated to include the storage layer.
   - "Why these choices" section: why Scylla (matches Bluesky prod), why Go (matches atproto), why drop-vs-block, why per-DID partitioning.
 
-- [ ] **5.2 Code cleanup pass**
-  - Typos: `controlsThe` (simulator.go), `subscribining` (main.go), comment grammar in `log_handler.go`.
+- [X] **5.2 Code cleanup pass**
+  - Typos: `controlsThe` (simulator.go), `subscribing` (main.go), comment grammar in `log_handler.go`.
   - Drop `PostgresDSN` / `RedisAddr` from `Config` — they're unused and misleading.
   - Extract `MustLoad` env-override repetition into a small helper if it grows much further (currently borderline; leave alone if it doesn't).
 
@@ -115,7 +115,7 @@ Goal: numbers to point at. This is the headline of the demo.
 
 ---
 
-## Out of scope (call out in interview, don't build)
+## Out of scope
 
 - Real WebSocket firehose client (interface is already there; swapping in `indigo` is mechanical).
 - Multi-node Scylla / replication tuning.
