@@ -26,10 +26,6 @@ type Config struct {
 	ChannelBuffer    int
 	BackpressureMode BackpressureMode
 
-	// Storage (populated in later release)
-	PostgresDSN string
-	RedisAddr   string
-
 	// Scylla
 	ScyllaHosts             []string
 	ScyllaKeyspace          string
@@ -75,8 +71,6 @@ func MustLoad(env string) *Config {
 		ChannelBuffer:           k.Int("channel_buffer"),
 		EventsPerSecond:         k.Int("events_per_second"),
 		BackpressureMode:        BackpressureMode(k.String("backpressure_mode")),
-		PostgresDSN:             k.String("postgres_dsn"),
-		RedisAddr:               k.String("redis_addr"),
 		MetricsAddr:             k.String("metrics_addr"),
 		SimulatorConcurrency:    k.Int("simulator_concurrency"),
 		BurstMultiplier:         k.Float64("burst_multiplier"),
@@ -94,28 +88,35 @@ func MustLoad(env string) *Config {
 	}
 	l.Info("config from files", "config", cfg)
 
-	// Override with environment variables if set
-	if v := os.Getenv("WORKER_COUNT"); v != "" {
-		count, err := strconv.Atoi(v)
-		if err != nil {
-			panic(fmt.Errorf("invalid WORKER_COUNT: %v", err))
-		}
-		cfg.WorkerCount = count
+	intEnvs := map[string]int{
+		"WORKER_COUNT":      cfg.WorkerCount,
+		"CHANNEL_BUFFER":    cfg.ChannelBuffer,
+		"EVENTS_PER_SECOND": cfg.EventsPerSecond,
+		"BURST_DURATION":    cfg.BurstDuration,
 	}
-	if v := os.Getenv("CHANNEL_BUFFER"); v != "" {
-		buffer, err := strconv.Atoi(v)
-		if err != nil {
-			panic(fmt.Errorf("invalid CHANNEL_BUFFER: %v", err))
+	for k := range intEnvs {
+		if ev := os.Getenv(k); ev != "" {
+			iv, err := strconv.Atoi(ev)
+			if err != nil {
+				panic(fmt.Errorf("invalid %s: %v", k, err))
+			}
+			intEnvs[k] = iv
 		}
-		cfg.ChannelBuffer = buffer
 	}
-	if v := os.Getenv("EVENTS_PER_SECOND"); v != "" {
-		events, err := strconv.Atoi(v)
-		if err != nil {
-			panic(fmt.Errorf("invalid EVENTS_PER_SECOND: %v", err))
+
+	floatEnvs := map[string]float64{
+		"BURST_MULTIPLIER": cfg.BurstMultiplier,
+	}
+	for k := range floatEnvs {
+		if ev := os.Getenv(k); ev != "" {
+			fv, err := strconv.ParseFloat(ev, 64)
+			if err != nil {
+				panic(fmt.Errorf("invalid %s: %v", k, err))
+			}
+			floatEnvs[k] = fv
 		}
-		cfg.EventsPerSecond = events
 	}
+
 	if v := os.Getenv("BACKPRESSURE_MODE"); v != "" {
 		mode := BackpressureMode(v)
 		if mode != ModeBlock && mode != ModeDrop {
@@ -123,113 +124,18 @@ func MustLoad(env string) *Config {
 		}
 		cfg.BackpressureMode = mode
 	}
-	if v := os.Getenv("SIMULATOR_CONCURRENCY"); v != "" {
-		concurrency, err := strconv.Atoi(v)
-		if err != nil {
-			panic(fmt.Errorf("invalid SIMULATOR_CONCURRENCY: %v", err))
-		}
-		cfg.SimulatorConcurrency = concurrency
-	}
-	if v := os.Getenv("BURST_MULTIPLIER"); v != "" {
-		multiplier, err := strconv.ParseFloat(v, 64)
-		if err != nil {
-			panic(fmt.Errorf("invalid BURST_MULTIPLIER: %v", err))
-		}
-		cfg.BurstMultiplier = multiplier
-	}
-	if v := os.Getenv("BURST_DURATION"); v != "" {
-		duration, err := strconv.Atoi(v)
-		if err != nil {
-			panic(fmt.Errorf("invalid BURST_DURATION: %v", err))
-		}
-		cfg.BurstDuration = duration
-	}
-	if v := os.Getenv("SIMULATOR_DURATION"); v != "" {
-		d, err := time.ParseDuration(v)
-		if err != nil {
-			panic(fmt.Errorf("invalid SIMULATOR_DURATION: %v", err))
-		}
-		cfg.SimulatorDuration = d
-	}
 
-	if v := os.Getenv("POSTGRES_DSN"); v != "" {
-		if v == "" {
-			panic(fmt.Errorf("POSTGRES_DSN is required"))
+	durEnvs := map[string]time.Duration{
+		"SIMULATOR_DURATION": cfg.SimulatorDuration,
+	}
+	for k := range durEnvs {
+		if ev := os.Getenv(k); ev != "" {
+			d, err := time.ParseDuration(ev)
+			if err != nil {
+				panic(fmt.Errorf("invalid %s: %v", k, err))
+			}
+			durEnvs[k] = d
 		}
-		cfg.PostgresDSN = v
-	}
-
-	if v := os.Getenv("REDIS_ADDR"); v != "" {
-		if v == "" {
-			panic(fmt.Errorf("REDIS_ADDR is required"))
-		}
-		cfg.RedisAddr = v
-	}
-
-	if v := os.Getenv("METRICS_ADDR"); v != "" {
-		if v == "" {
-			panic(fmt.Errorf("METRICS_ADDR is required"))
-		}
-		cfg.MetricsAddr = v
-	}
-
-	if v := os.Getenv("SCYLLA_HOSTS"); v != "" {
-		cfg.ScyllaHosts = strings.Split(v, ",")
-	}
-	if v := os.Getenv("SCYLLA_KEYSPACE"); v != "" {
-		cfg.ScyllaKeyspace = v
-	}
-	if v := os.Getenv("SCYLLA_CONSISTENCY"); v != "" {
-		cfg.ScyllaConsistency = v
-	}
-	if v := os.Getenv("SCYLLA_TIMEOUT_MS"); v != "" {
-		ms, err := strconv.Atoi(v)
-		if err != nil {
-			panic(fmt.Errorf("invalid SCYLLA_TIMEOUT_MS: %v", err))
-		}
-		cfg.ScyllaTimeoutMS = ms
-	}
-	if v := os.Getenv("SCYLLA_NUM_CONNS"); v != "" {
-		numConns, err := strconv.Atoi(v)
-		if err != nil {
-			panic(fmt.Errorf("invalid SCYLLA_NUM_CONNS: %v", err))
-		}
-		cfg.ScyllaNumConns = numConns
-	}
-	if v := os.Getenv("SCYLLA_BATCH_SIZE"); v != "" {
-		size, err := strconv.Atoi(v)
-		if err != nil {
-			panic(fmt.Errorf("invalid SCYLLA_BATCH_SIZE: %v", err))
-		}
-		cfg.ScyllaBatchSize = size
-	}
-	if v := os.Getenv("SCYLLA_BATCH_FLUSH_MS"); v != "" {
-		ms, err := strconv.Atoi(v)
-		if err != nil {
-			panic(fmt.Errorf("invalid SCYLLA_BATCH_FLUSH_MS: %v", err))
-		}
-		cfg.ScyllaBatchFlushMS = ms
-	}
-	if v := os.Getenv("SCYLLA_BATCH_FLUSH_WORKERS"); v != "" {
-		workers, err := strconv.Atoi(v)
-		if err != nil {
-			panic(fmt.Errorf("invalid SCYLLA_BATCH_FLUSH_WORKERS: %v", err))
-		}
-		cfg.ScyllaBatchFlushWorkers = workers
-	}
-	if v := os.Getenv("SCYLLA_BATCH_QUEUE_SIZE"); v != "" {
-		queueSize, err := strconv.Atoi(v)
-		if err != nil {
-			panic(fmt.Errorf("invalid SCYLLA_BATCH_QUEUE_SIZE: %v", err))
-		}
-		cfg.ScyllaBatchQueueSize = queueSize
-	}
-	if v := os.Getenv("SCYLLA_BATCH_SHARDS"); v != "" {
-		shards, err := strconv.Atoi(v)
-		if err != nil {
-			panic(fmt.Errorf("invalid SCYLLA_BATCH_SHARDS: %v", err))
-		}
-		cfg.ScyllaBatchShards = shards
 	}
 
 	l.Info("config from environment variables", "config", cfg)
