@@ -24,7 +24,7 @@ run-stress-02:
 
 # run the scanner with max-throughput profile from sweep (60s)
 run-stress-max:
-    BACKPRESSURE_MODE=drop WORKER_COUNT=100 EVENTS_PER_SECOND=1000000 SIMULATOR_CONCURRENCY=20 SCYLLA_NUM_CONNS=64 SCYLLA_BATCH_FLUSH_WORKERS=64 SCYLLA_BATCH_QUEUE_SIZE=4096 SCYLLA_BATCH_SIZE=400 SCYLLA_BATCH_SHARDS=128 SIMULATOR_DURATION=60s go run ./cmd/scanner
+    BACKPRESSURE_MODE=drop WORKER_COUNT=100 EVENTS_PER_SECOND=1000000 SIMULATOR_CONCURRENCY=20 SCYLLA_NUM_CONNS=64 SCYLLA_BATCH_FLUSH_WORKERS=64 SCYLLA_BATCH_QUEUE_SIZE=4096 SCYLLA_BATCH_SIZE=400 SCYLLA_BATCH_SHARDS=128 SIMULATOR_DURATION=5m go run ./cmd/scanner
 
 # build the scanner binary
 build:
@@ -60,13 +60,13 @@ generate:
 
 # ── Scylla — standalone containers ────────────────────────────────────────────
 
-# start a single standalone Scylla container
-scylla-start:
+# start a standalone Scylla seed (e.g.: just scylla-start 4 2G)
+scylla-start smp="1" memory="1G":
     docker run --name some-scylla --hostname some-scylla -p 9042:9042 -d scylladb/scylla \
-        --developer-mode=1 --overprovisioned=1 --smp=1 --memory=1G --reserve-memory=0M
+        --developer-mode=1 --overprovisioned=1 --smp={{ smp }} --memory={{ memory }} --reserve-memory=0M
 
-# add the next Scylla node and seed it from the first
-scylla-add-node:
+# add the next Scylla node, seeded from some-scylla (e.g.: just scylla-add-node 4 2G)
+scylla-add-node smp="1" memory="1G":
     @set -eu; \
         echo "Waiting for seed node (some-scylla) to be ready..."; \
         until docker exec some-scylla nodetool status 2>/dev/null | grep -q "^UN"; do sleep 5; done; \
@@ -77,36 +77,44 @@ scylla-add-node:
         seed_ip="$(docker inspect some-scylla | python3 -c 'import json,sys; obj=json.load(sys.stdin)[0]; nets=obj["NetworkSettings"]["Networks"]; print(next(iter(nets.values()))["IPAddress"])' | tr -d '\n')"; \
         echo "Seed node is ready. Starting ${node_name}..."; \
         docker run --name "$node_name" --hostname "$node_name" -d scylladb/scylla \
-            --developer-mode=1 --overprovisioned=1 --smp=1 --memory=1G --reserve-memory=0M \
+            --developer-mode=1 --overprovisioned=1 --smp={{ smp }} --memory={{ memory }} --reserve-memory=0M \
             --seeds="$seed_ip"
 
-# check cluster status via nodetool
+# check nodetool status across every running some-scylla* container
 scylla-status:
-    @echo "--- some-scylla ---"
-    @docker exec some-scylla nodetool status || echo "some-scylla not ready yet"
-    @echo "--- some-scylla2 ---"
-    @docker exec some-scylla2 nodetool status || echo "some-scylla2 not ready yet"
+    @set -eu; \
+        nodes=$(docker ps --filter "name=^/some-scylla[0-9]*$" --no-trunc | awk 'NR > 1 {print $NF}' | sort); \
+        if [ -z "$nodes" ]; then echo "No running some-scylla* containers."; exit 0; fi; \
+        for c in $nodes; do \
+            echo "--- $c ---"; \
+            docker exec "$c" nodetool status 2>/dev/null || echo "$c not ready yet"; \
+        done
 
-# wait until the node is UN (Up/Normal) — polls every 5
+# wait until the seed node is UN (Up/Normal)
 scylla-wait:
     @echo "Waiting for Scylla to be ready..."
     @until docker exec some-scylla nodetool status 2>/dev/null | grep -q "^UN"; do sleep 5; done
     @echo "Scylla is ready."
 
-# wait until both nodes in the 2-node cluster are UN
+# wait until every running some-scylla* container is UN
 scylla-wait-cluster:
-    @echo "Waiting for 2-node Scylla cluster to be ready..."
-    @until docker exec some-scylla nodetool status 2>/dev/null | grep -q "^UN"; do sleep 5; done
-    @until docker exec some-scylla2 nodetool status 2>/dev/null | grep -q "^UN"; do sleep 5; done
-    @echo "Scylla cluster is ready."
+    @set -eu; \
+        echo "Waiting for Scylla cluster to be ready..."; \
+        nodes=$(docker ps --filter "name=^/some-scylla[0-9]*$" --no-trunc | awk 'NR > 1 {print $NF}' | sort); \
+        if [ -z "$nodes" ]; then echo "No running some-scylla* containers."; exit 1; fi; \
+        for c in $nodes; do \
+            until docker exec "$c" nodetool status 2>/dev/null | grep -q "^UN"; do sleep 5; done; \
+            echo "$c is UN"; \
+        done; \
+        echo "Scylla cluster is ready."
 
-# open a CQL shell into the standalone Scylla container
+# open a CQL shell into the seed node
 scylla-shell:
     docker exec -it some-scylla cqlsh
 
-# stop and remove standalone Scylla containers
+# stop and remove every some-scylla* container
 scylla-stop:
-    docker rm -f some-scylla some-scylla2 2>/dev/null || true
+    @docker ps -a --filter "name=^/some-scylla[0-9]*$" --no-trunc | awk 'NR > 1 {print $NF}' | xargs -r docker rm -f
 
 # ── Observability — Prometheus + Grafana via docker-compose ───────────────────
 
