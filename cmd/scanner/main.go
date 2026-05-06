@@ -27,14 +27,6 @@ func main() {
 	l.Info("starting firehose abuse scanner")
 
 	cfg := config.MustLoad(os.Getenv("ENV"))
-	l.Info("config", "config", cfg)
-
-	l.Info("starting firehose abuse scanner",
-		"workers", cfg.WorkerCount,
-		"channel_buffer", cfg.ChannelBuffer,
-		"events_per_second", cfg.EventsPerSecond,
-		"backpressure_mode", cfg.BackpressureMode,
-	)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()

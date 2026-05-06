@@ -17,7 +17,7 @@ A high-throughput event ingestion and analysis service that consumes Bluesky eve
 │  Pipeline (Fan-in)                             │
 │  ├─ Receive loop (single goroutine)            │
 │  └─ Work queue (buffered channel)              │
-│     BACKPRESSURE_MODE: drop or block           │
+│     Backpressure: drop or block                │
 └────────┬──────────────────────────────────────┘
          │
          │ Work distribution
@@ -46,17 +46,19 @@ Prerequisites:
 * [go](https://go.dev/) - Known working with go version `1.26.2`
 * [Docker](https://docs.docker.com/get-docker/) with Compose v2 — only needed once the storage layer is wired up (Phase 1)
 
-With defaults (50 workers, 10k channel buffer):
+Defaults come from `config.json` layered with `config.dev.json`:
 
 ```bash
 go run ./cmd/scanner
 ```
 
-With overridden values:
+Pick a different profile by setting `ENV` to the suffix of any `config.<env>.json` file (e.g. `stress`, `stress-02`, `stress-max`):
 
 ```bash
-BACKPRESSURE_MODE=block WORKER_COUNT=100 EVENTS_PER_SECOND=10000 go run ./cmd/scanner
+ENV=stress go run ./cmd/scanner
 ```
+
+`ENV` is the only environment variable the scanner consults — every other knob lives in the JSON files so a run is reproducible from the checked-in config alone. The [justfile](justfile) wraps the common profiles as `just run`, `just run-stress`, `just run-stress-02`, `just run-stress-max`, and `just run-env <name>` for ad-hoc envs.
 
 ### Storage (Scylla)
 
@@ -94,21 +96,21 @@ docker compose down -v
 
 #### Connection settings
 
-The scanner reads Scylla connection details from `config.json` / `config.<env>.json`, with `SCYLLA_*` env vars taking precedence:
+The scanner reads Scylla connection details from `config.json` / `config.<env>.json`:
 
-| config key           | env var              | default              | notes                                        |
-| -------------------- | -------------------- | -------------------- | -------------------------------------------- |
-| `scylla_hosts`       | `SCYLLA_HOSTS`       | `["127.0.0.1:9042"]` | env var is comma-separated (`host1,host2`)   |
-| `scylla_keyspace`    | `SCYLLA_KEYSPACE`    | `firehose_scanner`   | created on first boot via embedded schema    |
-| `scylla_consistency` | `SCYLLA_CONSISTENCY` | `ONE`                | matches RF=1 single-node demo                |
-| `scylla_timeout_ms`  | `SCYLLA_TIMEOUT_MS`  | `5000`               | applies to both connect and per-query timeout |
+| config key           | default              | notes                                        |
+| -------------------- | -------------------- | -------------------------------------------- |
+| `scylla_hosts`       | `["127.0.0.1:9042"]` | list of `host:port` strings                  |
+| `scylla_keyspace`    | `firehose_scanner`   | created on first boot via embedded schema    |
+| `scylla_consistency` | `ONE`                | matches RF=1 single-node demo                |
+| `scylla_timeout_ms`  | `5000`               | applies to both connect and per-query timeout |
 
 The schema in [internal/storage/scylla/schema.cql](internal/storage/scylla/schema.cql) is embedded into the binary and applied (idempotently) on every startup, so a fresh `docker compose down -v && docker compose up -d db` is enough to reset state for a clean demo run.
 
 ### Sample output
 
 ```bash
-{17:06}~/code/mxygem/firehose-abuse-scanner:main ✗ ➭ BACKPRESSURE_MODE=drop go run ./cmd/scanner
+{17:06}~/code/mxygem/firehose-abuse-scanner:main ✗ ➭ ENV=stress go run ./cmd/scanner
 {"time":"2026-04-28T17:06:55.271589539-07:00","level":"INFO","msg":"starting firehose abuse scanner"}
 {"time":"2026-04-28T17:06:55.272150269-07:00","level":"INFO","msg":"starting firehose abuse scanner","workers":5,"channel_buffer":1000,"events_per_second":20000,"backpressure_mode":"drop"}
 {"time":"2026-04-28T17:06:55.272654995-07:00","level":"INFO","msg":"firehose client ready","source":"local-simulator"}

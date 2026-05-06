@@ -10,21 +10,21 @@ default:
 run:
     go run ./cmd/scanner
 
-# run the scanner for a fixed duration then exit cleanly (e.g.: just run-timed 5s)
-run-timed duration:
-    SIMULATOR_DURATION={{ duration }} go run ./cmd/scanner
+# run the scanner against a named env (e.g.: just run-env stress)
+run-env env:
+    ENV={{ env }} go run ./cmd/scanner
 
-# run the scanner with high-throughput drop config
+# run the scanner with high-throughput drop config (config.stress.json, 60s)
 run-stress:
-    BACKPRESSURE_MODE=drop WORKER_COUNT=100 EVENTS_PER_SECOND=1000000 SIMULATOR_CONCURRENCY=20 SCYLLA_NUM_CONNS=8 SCYLLA_BATCH_FLUSH_WORKERS=8 SCYLLA_BATCH_QUEUE_SIZE=256 SIMULATOR_DURATION=60s go run ./cmd/scanner
+    ENV=stress go run ./cmd/scanner
 
-# run the scanner with tuned Scylla concurrency baseline (60s)
+# run the scanner with tuned Scylla concurrency baseline (config.stress-02.json, 60s)
 run-stress-02:
-    BACKPRESSURE_MODE=drop WORKER_COUNT=100 EVENTS_PER_SECOND=1000000 SIMULATOR_CONCURRENCY=20 SCYLLA_NUM_CONNS=32 SCYLLA_BATCH_FLUSH_WORKERS=32 SCYLLA_BATCH_QUEUE_SIZE=2048 SCYLLA_BATCH_SIZE=200 SCYLLA_BATCH_SHARDS=64 SIMULATOR_DURATION=60s go run ./cmd/scanner
+    ENV=stress-02 go run ./cmd/scanner
 
-# run the scanner with max-throughput profile from sweep (60s)
+# run the scanner with max-throughput profile from sweep (config.stress-max.json, 5m)
 run-stress-max:
-    BACKPRESSURE_MODE=drop WORKER_COUNT=100 EVENTS_PER_SECOND=1000000 SIMULATOR_CONCURRENCY=20 SCYLLA_NUM_CONNS=64 SCYLLA_BATCH_FLUSH_WORKERS=64 SCYLLA_BATCH_QUEUE_SIZE=4096 SCYLLA_BATCH_SIZE=400 SCYLLA_BATCH_SHARDS=128 SIMULATOR_DURATION=5m go run ./cmd/scanner
+    ENV=stress-max go run ./cmd/scanner
 
 # build the scanner binary
 build:
