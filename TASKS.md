@@ -47,7 +47,7 @@ Goal: a small but realistic rule set that produces hits the dashboard/CLI can sh
   - `type Detector interface { Inspect(ctx, evt) []Hit }` in `internal/detect`.
   - `Hit` carries `RuleID`, `Severity`, `Reason`, `Evidence`.
 
-- [ ] **2.2 Rule: spam keyword / regex**
+- [X] **2.2 Rule: spam keyword / regex**
   - Compile a small set of patterns (the simulator already seeds obvious ones like "BUY NOW", "free crypto").
   - Cheap, allocation-free hot path.
 
