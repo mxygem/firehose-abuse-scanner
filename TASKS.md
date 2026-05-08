@@ -51,7 +51,7 @@ Goal: a small but realistic rule set that produces hits the dashboard/CLI can sh
   - Compile a small set of patterns (the simulator already seeds obvious ones like "BUY NOW", "free crypto").
   - Cheap, allocation-free hot path.
 
-- [ ] **2.3 Rule: link blocklist**
+- [X] **2.3 Rule: link blocklist**
   - Match against a static set of bad domains; the simulator's `spam-link.xyz` and `phishing.example.com` are the obvious seeds.
 
 - [ ] **2.4 Rule: per-DID rate spike**
