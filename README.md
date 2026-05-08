@@ -16,27 +16,39 @@ A high-throughput event ingestion and analysis service that consumes Bluesky eve
 ┌────────▼──────────────────────────────────────┐
 │  Pipeline (Fan-in)                             │
 │  ├─ Receive loop (single goroutine)            │
+│  ├─ Scheduler (round-robin or per-DID)         │
 │  └─ Work queue (buffered channel)              │
 │     Backpressure: drop or block                │
 └────────┬──────────────────────────────────────┘
          │
          │ Work distribution
          │
-    ┌────┴─────────────────────────┐
-    │                              │
-┌───▼──┐  ┌──────┐  ┌──────┐  ┌──▼───┐
-│ W1   │  │ W2   │  │ W3   │  │ ...  │  Worker pool (configurable count)
-│      │  │      │  │      │  │      │
-└───┬──┘  └──┬───┘  └──┬───┘  └──┬───┘
-    │       │        │        │
-    │       │        │        │  Handler.Handle()
-    └───────┼────────┼────────┘  (abuse detection)
-            │
-         Stats (atomic counters)
-         ├─ Received
-         ├─ Processed
-         ├─ Dropped
-         └─ Errors
+    ┌────┴────────────────────────┐
+    │           │           │     │
+┌───▼──┐  ┌─────▼──┐  ┌─────▼──┐  ┌──▼───┐
+│ W1   │  │ W2     │  │ W3     │  │ ...  │   Worker pool (configurable count)
+│      │  │        │  │        │  │      │   Handler.Handle(evt)
+└───┬──┘  └─────┬──┘  └─────┬──┘  └──┬───┘
+    │           │           │        │
+    │           │           │        │
+┌───▼───────────▼───────────▼────────▼────┐
+│  Detect (rules)                          │   Inspect(evt) []Hit
+│  ├─ keyword / regex                      │
+│  ├─ link blocklist                       │
+│  └─ per-DID rate spike (sliding window)  │
+└───┬──────────────────────────────────────┘
+    │
+    │ raw event + any hits
+    │
+┌───▼────────────────────────────────────────┐
+│  Storage (Scylla)                           │
+│  ├─ events_by_did       (per-author)        │   Batched writes
+│  ├─ events_by_minute    (time-window)       │   (UNLOGGED BATCH)
+│  └─ flagged_events      (detector hits)     │
+└─────────────────────────────────────────────┘
+
+Stats (atomic counters): Received │ Processed │ Dropped │ Errors
+Metrics: Prometheus exporter (worker queue depth, handler latency, write throughput)
 ```
 
 ## Running
@@ -129,17 +141,37 @@ firehose-abuse-scanner/
 │       └── main.go
 ├── internal/
 │   ├── config/
-│   │   ├── config.go         # env-based config
+│   │   └── config.go              # koanf-loaded JSON + ENV layering
+│   ├── detect/
+│   │   ├── detect.go              # Detector interface + Hit
+│   │   ├── keyword.go             # keyword / regex spam rule
+│   │   └── blocklist.go           # link-host blocklist rule
 │   ├── firehose/
-│   │   ├── simulator.go      # local event generator
-│   │   └── client.go         # interface (swap in real WS later)
+│   │   ├── client.go              # Subscribe interface (swap in real WS later)
+│   │   └── simulator.go           # local event generator
+│   ├── metrics/
+│   │   └── metrics.go             # Prometheus exporter
+│   ├── models/
+│   │   └── event.go               # FirehoseEvent + EventKind
 │   ├── pipeline/
-│   │   ├── pipeline.go       # worker pool + channel orchestration
-│   │   └── backpressure.go   # drop vs block mode
-│   └── models/
-│       └── event.go          # shared event types
-├── config.dev.json
-├── docker-compose.yml
+│   │   ├── pipeline.go            # worker pool + drop/block backpressure
+│   │   ├── scheduler.go           # round-robin scheduler
+│   │   ├── parallel_scheduler.go  # per-DID-affinity scheduler
+│   │   ├── log_handler.go         # debug Handler
+│   │   └── scylla_handler.go      # Scylla-backed Handler
+│   └── storage/
+│       ├── storage.go             # Storer interface + FlaggedRecord
+│       └── scylla/
+│           ├── schema.cql         # embedded keyspace + tables
+│           ├── session.go         # gocql session bootstrap
+│           ├── store.go           # single-row Insert*
+│           └── batch_store.go     # UNLOGGED BATCH writer
+├── config.json                    # base config
+├── config.dev.json                # ENV=dev overlay
+├── config.stress*.json            # benchmark profiles
+├── docker-compose.yml             # Scylla + observability stack
+├── justfile                       # run/test wrappers
 ├── go.mod
+├── TASKS.md
 └── README.md
 ```
