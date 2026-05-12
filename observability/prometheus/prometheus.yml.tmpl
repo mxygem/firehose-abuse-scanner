@@ -1,9 +1,0 @@
-global:
-  scrape_interval: 5s
-  evaluation_interval: 5s
-
-scrape_configs:
-  - job_name: scanner
-    static_configs:
-      - targets: ["__SCANNER_TARGET__"]
-    metrics_path: /metrics
