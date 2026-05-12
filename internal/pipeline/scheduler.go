@@ -48,6 +48,18 @@ type SchedulerStats struct {
 	Errors    uint64
 }
 
+// LatencySummary captures handler-latency percentiles in microseconds. It's
+// produced by schedulers that maintain per-worker histograms and consumed by
+// the end-of-run benchmark printer.
+type LatencySummary struct {
+	Count int64
+	P50   int64
+	P95   int64
+	P99   int64
+	P999  int64
+	Max   int64
+}
+
 // ErrDropped is returned by AddWork in drop mode when the target worker has no
 // capacity. The scheduler has already incremented its dropped counter, so the
 // caller can treat this as a no-op.

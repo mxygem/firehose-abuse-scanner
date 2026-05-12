@@ -8,10 +8,12 @@ import (
 	"hash/maphash"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gocql/gocql"
 
+	"github.com/mxygem/firehose-abuse-scanner/internal/metrics"
 	"github.com/mxygem/firehose-abuse-scanner/internal/models"
 	"github.com/mxygem/firehose-abuse-scanner/internal/storage"
 )
@@ -70,6 +72,24 @@ type BatchStore struct {
 	stopCh  chan struct{}
 	doneCh  chan struct{}
 	wg      sync.WaitGroup
+
+	// Outcome counters. The pipeline-side handler returns nil from
+	// InsertEvent (writes are buffered), so flush failures here are the
+	// only honest signal of how much actually landed in Scylla.
+	flushedEvents  atomic.Uint64
+	flushedBatches atomic.Uint64
+	failedEvents   atomic.Uint64
+	failedBatches  atomic.Uint64
+}
+
+// BatchStats is a point-in-time view of what the batched writer has
+// attempted and how it turned out. Use it to reconcile the pipeline's
+// "processed" count against rows that actually landed in Scylla.
+type BatchStats struct {
+	FlushedEvents  uint64
+	FlushedBatches uint64
+	FailedEvents   uint64
+	FailedBatches  uint64
 }
 
 type batchBuffer struct {
@@ -284,9 +304,45 @@ func (s *BatchStore) flusher() {
 func (s *BatchStore) flushWorker() {
 	defer s.wg.Done()
 	for job := range s.flushCh {
-		if err := s.executeBatch(job); err != nil {
-			s.l.Warn("execute event batch", "target", job.target, "events", len(job.events), "error", err)
+		target := targetLabel(job.target)
+		start := time.Now()
+		err := s.executeBatch(job)
+		metrics.ScyllaBatchDuration.WithLabelValues(target).Observe(time.Since(start).Seconds())
+		n := uint64(len(job.events))
+		if err != nil {
+			s.failedBatches.Add(1)
+			s.failedEvents.Add(n)
+			metrics.ScyllaBatchFailures.WithLabelValues(target).Inc()
+			metrics.ScyllaBatchEventsFailed.WithLabelValues(target).Add(float64(n))
+			s.l.Warn("execute event batch", "target", target, "events", n, "error", err)
+			continue
 		}
+		s.flushedBatches.Add(1)
+		s.flushedEvents.Add(n)
+		metrics.ScyllaBatchesFlushed.WithLabelValues(target).Inc()
+		metrics.ScyllaBatchEventsFlushed.WithLabelValues(target).Add(float64(n))
+	}
+}
+
+// Stats returns a snapshot of batch outcomes since startup. The pipeline's
+// Processed counter overstates writes by the failed-events count.
+func (s *BatchStore) Stats() BatchStats {
+	return BatchStats{
+		FlushedEvents:  s.flushedEvents.Load(),
+		FlushedBatches: s.flushedBatches.Load(),
+		FailedEvents:   s.failedEvents.Load(),
+		FailedBatches:  s.failedBatches.Load(),
+	}
+}
+
+func targetLabel(t batchTarget) string {
+	switch t {
+	case targetByDID:
+		return "events_by_did"
+	case targetByMinute:
+		return "events_by_minute"
+	default:
+		return "unknown"
 	}
 }
 

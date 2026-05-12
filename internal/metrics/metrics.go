@@ -54,6 +54,39 @@ var (
 	})
 )
 
+// ── Scylla batch writer ───────────────────────────────────────────────────────
+// Honest signal of how much landed in Scylla. The pipeline's
+// scanner_events_processed_total counts events that returned from the buffered
+// InsertEvent (always nil) — failed flushes are invisible there.
+
+var (
+	ScyllaBatchesFlushed = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "scanner_scylla_batches_flushed_total",
+		Help: "Number of UNLOGGED BATCHes successfully written to Scylla, by target table.",
+	}, []string{"target"})
+
+	ScyllaBatchEventsFlushed = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "scanner_scylla_batch_events_flushed_total",
+		Help: "Number of event rows actually written to Scylla, by target table.",
+	}, []string{"target"})
+
+	ScyllaBatchFailures = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "scanner_scylla_batch_failures_total",
+		Help: "Number of batches that failed to write to Scylla, by target table.",
+	}, []string{"target"})
+
+	ScyllaBatchEventsFailed = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "scanner_scylla_batch_events_failed_total",
+		Help: "Number of event rows lost to a failed batch, by target table.",
+	}, []string{"target"})
+
+	ScyllaBatchDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "scanner_scylla_batch_duration_seconds",
+		Help:    "End-to-end latency of one UNLOGGED BATCH execution against Scylla.",
+		Buckets: prometheus.ExponentialBuckets(0.001, 2, 14), // 1ms → ~16s
+	}, []string{"target"})
+)
+
 // ── ETL signal hits ───────────────────────────────────────────────────────────
 // These are stubbed now and wired into the real ETL in the next milestone.
 

@@ -82,7 +82,7 @@ Bring it up:
 docker compose up -d db
 ```
 
-The service is tuned for laptop use (`--smp 2 --memory 1G --overprovisioned 1 --developer-mode 1`). Bootstrap takes ~15–30 seconds; wait for the healthcheck to go green before pointing the scanner at it:
+The container is sized for a workstation-class demo (`--smp 8 --memory 4G --overprovisioned 1 --developer-mode 1`) — eight shards and 4 GiB of off-heap memory for the row cache, which keeps Scylla from being the bottleneck under the `stress-max` profile. Bootstrap takes ~30–60 seconds; wait for the healthcheck to go green before pointing the scanner at it:
 
 ```bash
 docker compose ps      # STATUS should show "healthy"
@@ -110,11 +110,11 @@ docker compose down -v
 
 The scanner reads Scylla connection details from `config.json` / `config.<env>.json`:
 
-| config key           | default              | notes                                        |
-| -------------------- | -------------------- | -------------------------------------------- |
-| `scylla_hosts`       | `["127.0.0.1:9042"]` | list of `host:port` strings                  |
-| `scylla_keyspace`    | `firehose_scanner`   | created on first boot via embedded schema    |
-| `scylla_consistency` | `ONE`                | matches RF=1 single-node demo                |
+| config key           | default              | notes                                         |
+| -------------------- | -------------------- | --------------------------------------------- |
+| `scylla_hosts`       | `["127.0.0.1:9042"]` | list of `host:port` strings                   |
+| `scylla_keyspace`    | `firehose_scanner`   | created on first boot via embedded schema     |
+| `scylla_consistency` | `ONE`                | matches RF=1 single-node demo                 |
 | `scylla_timeout_ms`  | `5000`               | applies to both connect and per-query timeout |
 
 The schema in [internal/storage/scylla/schema.cql](internal/storage/scylla/schema.cql) is embedded into the binary and applied (idempotently) on every startup, so a fresh `docker compose down -v && docker compose up -d db` is enough to reset state for a clean demo run.
@@ -174,4 +174,35 @@ firehose-abuse-scanner/
 ├── go.mod
 ├── TASKS.md
 └── README.md
+```
+
+## Performance
+
+* Peak: 151k flushed events/s (stress-max-3)
+* Conservative repeatable band: ~123k–151k flushed/s on stress-max (with 0 failed-event runs)
+
+### Most Recent Guidance
+
+```
+Great question — I’ll inspect the batch writer internals to pinpoint where your current ceiling is coming from, then give you a concrete tuning order to push beyond it.
+
+Biggest thing first: you’re comparing against a target that likely uses a different unit.
+
+Your summary’s flushed events is row writes, not logical firehose events.
+In this code, each logical event writes to two tables (events_by_did + events_by_minute) in BatchStore.InsertEvent.
+So your best 151k flushed events/s is roughly ~75k logical events/s durable.
+That means “1m+ durable events/s” would require ~2m row writes/s with current schema/write amplification — not realistic on a single Scylla container.
+
+What to do to improve (in order)
+Fix benchmark accounting first (important): current summary is printed before store.Close() drains final buffered batches, so you undercount landed writes in tail drain.
+Reduce write amplification: if benchmark goal is raw ingest ceiling, write one primary table only, or move events_by_minute projection async/offline.
+Run deterministic load for tuning: your simulator includes bursts/randomness, which causes huge run-to-run variance; tune on steady load first, then re-enable bursts.
+Tune batch path with a sweep: push scylla_batch_size, scylla_batch_flush_workers, scylla_num_conns, scylla_batch_shards together; look for first point where failures/timeouts appear, then back off 10–20%.
+Scale Scylla, not just app workers: once queue is saturated and drop% is high, more Go workers mostly increase pressure; you need more DB capacity (more cores/memory and ideally multi-node).
+Trim payload size for peak tests: text, links, langs are written twice; payload-heavy rows cap throughput early.
+Reality check on your numbers
+You already hit ~700k–900k recv/s in some runs.
+Durable ceiling currently is around ~75k logical events/s (from 151k row writes/s best case).
+To get “1m+ logical durable/s” on this design, you need roughly 10–15x improvement, which is architecture/infrastructure-level (not just config tuning).
+If you want, I can give you a tight sweep plan (exact parameter grid and stop conditions) to find the next 20–50% on this current single-node setup before bigger architecture changes.
 ```

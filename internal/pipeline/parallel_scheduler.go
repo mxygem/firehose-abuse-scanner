@@ -8,9 +8,20 @@ import (
 	"sync/atomic"
 	"time"
 
+	hdr "github.com/HdrHistogram/hdrhistogram-go"
+
 	"github.com/mxygem/firehose-abuse-scanner/internal/config"
 	"github.com/mxygem/firehose-abuse-scanner/internal/metrics"
 	"github.com/mxygem/firehose-abuse-scanner/internal/models"
+)
+
+// Handler-latency histogram bounds. Microsecond resolution from 1µs to 60s,
+// 3 significant figures — plenty of fidelity for p99.9 reporting and a few
+// hundred KB per histogram.
+const (
+	latencyMinUS  = 1
+	latencyMaxUS  = 60_000_000
+	latencySigfig = 3
 )
 
 // ParallelScheduler runs a fixed pool of workers, each owning a private channel.
@@ -27,6 +38,11 @@ type ParallelScheduler struct {
 	backpressureMode config.BackpressureMode
 	workers          []chan models.FirehoseEvent
 	seed             maphash.Seed
+
+	// One latency histogram per worker; each goroutine writes only to its
+	// own slot, so RecordValue is contention-free. Merge in LatencySnapshot
+	// once Shutdown has joined all workers.
+	latencies []*hdr.Histogram
 
 	stats SchedulerStats
 
@@ -53,12 +69,47 @@ func NewParallelScheduler(cfg *config.Config, handler Handler) *ParallelSchedule
 		handler:          handler,
 		backpressureMode: cfg.BackpressureMode,
 		workers:          make([]chan models.FirehoseEvent, n),
+		latencies:        make([]*hdr.Histogram, n),
 		seed:             maphash.MakeSeed(),
 	}
 	for i := range s.workers {
 		s.workers[i] = make(chan models.FirehoseEvent, perWorker)
+		s.latencies[i] = hdr.New(latencyMinUS, latencyMaxUS, latencySigfig)
 	}
 	return s
+}
+
+// clampLatencyUS converts a duration to microseconds and clamps it into the
+// histogram's recordable range so RecordValue never errors on extreme values.
+func clampLatencyUS(d time.Duration) int64 {
+	us := d.Microseconds()
+	if us < latencyMinUS {
+		return latencyMinUS
+	}
+	if us > latencyMaxUS {
+		return latencyMaxUS
+	}
+	return us
+}
+
+// LatencySnapshot merges the per-worker handler-latency histograms and
+// returns the percentiles callers care about. Values are microseconds. Safe
+// to call only after Shutdown has returned.
+func (s *ParallelScheduler) LatencySnapshot() LatencySummary {
+	merged := hdr.New(latencyMinUS, latencyMaxUS, latencySigfig)
+	for _, h := range s.latencies {
+		if h != nil {
+			merged.Merge(h)
+		}
+	}
+	return LatencySummary{
+		Count: merged.TotalCount(),
+		P50:   merged.ValueAtQuantile(50),
+		P95:   merged.ValueAtQuantile(95),
+		P99:   merged.ValueAtQuantile(99),
+		P999:  merged.ValueAtQuantile(99.9),
+		Max:   merged.Max(),
+	}
 }
 
 // Start spins up one goroutine per worker channel. The provided context is
@@ -151,10 +202,13 @@ func (s *ParallelScheduler) QueueCapacity() int {
 func (s *ParallelScheduler) runWorker(ctx context.Context, idx int) {
 	defer s.wg.Done()
 	l := slog.Default()
+	hist := s.latencies[idx]
 	for evt := range s.workers[idx] {
 		start := time.Now()
 		err := s.handler.Handle(ctx, evt)
-		metrics.ProcessingDuration.Observe(time.Since(start).Seconds())
+		elapsed := time.Since(start)
+		metrics.ProcessingDuration.Observe(elapsed.Seconds())
+		_ = hist.RecordValue(clampLatencyUS(elapsed))
 		if err != nil {
 			if ctx.Err() != nil {
 				// Context canceled at shutdown; stop quietly.

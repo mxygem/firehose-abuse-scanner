@@ -1,16 +1,38 @@
 services:
 
+  db:
+    image: scylladb/scylla:5.4
+    container_name: firehose-scylla
+    ports:
+      - "9042:9042"
+    command: --smp 8 --memory 4G --overprovisioned 1 --developer-mode 1
+    volumes:
+      - scylla-data:/var/lib/scylla
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "cqlsh -e 'SELECT now() FROM system.local' >/dev/null 2>&1",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    restart: unless-stopped
+
   prometheus:
     image: prom/prometheus:v2.51.2
     ports:
       - "9091:9090"
     volumes:
-      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/prometheus/prometheus.yml.tmpl:/etc/prometheus/prometheus.yml.tmpl:ro
       - prometheus_data:/prometheus
-    command:
-      - "--config.file=/etc/prometheus/prometheus.yml"
-      - "--storage.tsdb.path=/prometheus"
-      - "--storage.tsdb.retention.time=7d"
+    environment:
+      SCANNER_TARGET: "${SCANNER_TARGET:-host.docker.internal:9090}"
+    entrypoint:
+      - /bin/sh
+      - -c
+      - 'sed "s|__SCANNER_TARGET__|$$SCANNER_TARGET|g" /etc/prometheus/prometheus.yml.tmpl > /etc/prometheus/prometheus.yml && exec /bin/prometheus --config.file=/etc/prometheus/prometheus.yml --storage.tsdb.path=/prometheus --storage.tsdb.retention.time=7d'
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
@@ -33,5 +55,6 @@ services:
     restart: unless-stopped
 
 volumes:
+  scylla-data:
   prometheus_data:
   grafana_data:

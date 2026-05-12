@@ -1,10 +1,10 @@
 {
-    "worker_count": 100,
+    "worker_count": 500,
     "channel_buffer": 10000,
     "events_per_second": 1000000,
     "backpressure_mode": "drop",
     "simulator_concurrency": 20,
-    "simulator_duration": "5m",
+    "simulator_duration": "1m",
     "burst_multiplier": 3.0,
     "burst_duration": 10,
     "scylla_num_conns": 64,
