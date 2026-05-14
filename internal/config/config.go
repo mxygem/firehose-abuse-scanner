@@ -37,6 +37,17 @@ type Config struct {
 	ScyllaBatchQueueSize    int
 	ScyllaBatchShards       int
 
+	// Detectors
+	SpamKeywords      []string
+	SpamRegexes       []string
+	SpamSeverity      string
+	BlocklistDomains  []string
+	BlocklistSeverity string
+	RateWindowMS      int
+	RateThreshold     int
+	RateMaxDIDs       int
+	RateSeverity      string
+
 	// Observability
 	MetricsAddr string
 
@@ -93,6 +104,15 @@ func MustLoad(env string) *Config {
 		ScyllaBatchFlushWorkers: k.Int("scylla_batch_flush_workers"),
 		ScyllaBatchQueueSize:    k.Int("scylla_batch_queue_size"),
 		ScyllaBatchShards:       k.Int("scylla_batch_shards"),
+		SpamKeywords:            k.Strings("spam_keywords"),
+		SpamRegexes:             k.Strings("spam_regexes"),
+		SpamSeverity:            k.String("spam_severity"),
+		BlocklistDomains:        k.Strings("blocklist_domains"),
+		BlocklistSeverity:       k.String("blocklist_severity"),
+		RateWindowMS:            k.Int("rate_window_ms"),
+		RateThreshold:           k.Int("rate_threshold"),
+		RateMaxDIDs:             k.Int("rate_max_dids"),
+		RateSeverity:            k.String("rate_severity"),
 	}
 
 	if cfg.BackpressureMode != ModeBlock && cfg.BackpressureMode != ModeDrop {

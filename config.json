@@ -13,5 +13,14 @@
     "scylla_batch_flush_workers": 4,
     "scylla_batch_queue_size": 64,
     "scylla_batch_shards": 8,
-    "metrics_addr": ":9090"
+    "metrics_addr": ":9090",
+    "spam_keywords": ["BUY NOW", "free crypto", "free bitcoin", "[SPAM]"],
+    "spam_regexes": ["(?i)earn\\s+money\\s+fast"],
+    "spam_severity": "medium",
+    "blocklist_domains": ["spam-link.xyz", "phishing.example.com"],
+    "blocklist_severity": "high",
+    "rate_window_ms": 1000,
+    "rate_threshold": 50,
+    "rate_max_dids": 4096,
+    "rate_severity": "medium"
 }

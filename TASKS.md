@@ -43,7 +43,7 @@ Goal: a running Scylla node and a handler that durably writes every event the pi
 
 Goal: a small but realistic rule set that produces hits the dashboard/CLI can show.
 
-- [ ] **2.1 Detector interface**
+- [X] **2.1 Detector interface**
   - `type Detector interface { Inspect(ctx, evt) []Hit }` in `internal/detect`.
   - `Hit` carries `RuleID`, `Severity`, `Reason`, `Evidence`.
 
@@ -54,11 +54,11 @@ Goal: a small but realistic rule set that produces hits the dashboard/CLI can sh
 - [X] **2.3 Rule: link blocklist**
   - Match against a static set of bad domains; the simulator's `spam-link.xyz` and `phishing.example.com` are the obvious seeds.
 
-- [ ] **2.4 Rule: per-DID rate spike**
+- [X] **2.4 Rule: per-DID rate spike**
   - Sliding-window counter per DID (in-memory, e.g. `sync.Map` of ring buffers, capped LRU).
   - Flag when a DID exceeds N events per window. Tunable thresholds.
 
-- [ ] **2.5 Composite handler**
+- [X] **2.5 Composite handler**
   - Replaces ScyllaHandler as the pipeline handler. Order: write raw event → run detectors → if any hit, write flagged row.
   - Detectors run sequentially per event (each event already runs on its own goroutine via the worker pool).
 

@@ -14,6 +14,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/mxygem/firehose-abuse-scanner/internal/config"
+	"github.com/mxygem/firehose-abuse-scanner/internal/detect"
 	"github.com/mxygem/firehose-abuse-scanner/internal/firehose"
 	"github.com/mxygem/firehose-abuse-scanner/internal/pipeline"
 	"github.com/mxygem/firehose-abuse-scanner/internal/storage/scylla"
@@ -88,7 +89,14 @@ func main() {
 		os.Exit(1)
 	}
 
-	scheduler := pipeline.NewParallelScheduler(cfg, pipeline.NewScyllaHandler(store))
+	detectors, err := buildDetectors(cfg)
+	if err != nil {
+		l.Error("building detectors", "error", err)
+		os.Exit(1)
+	}
+	l.Info("detectors ready", "count", len(detectors))
+
+	scheduler := pipeline.NewParallelScheduler(cfg, pipeline.NewCompositeHandler(store, detectors...))
 	p := pipeline.New(cfg, scheduler)
 
 	runStart := time.Now()
@@ -146,4 +154,28 @@ func printBenchmarkSummary(p pipeline.Stats, lat pipeline.LatencySummary, b scyl
 
 func usToDuration(us int64) time.Duration {
 	return time.Duration(us) * time.Microsecond
+}
+
+// buildDetectors assembles the detector chain in a deterministic order:
+// cheap content checks first (keyword, blocklist), then stateful rate
+// detection. A rule with no configured input (e.g. empty keyword list) is
+// skipped so a feature can be turned off purely via config.
+func buildDetectors(cfg *config.Config) ([]detect.Detector, error) {
+	var ds []detect.Detector
+
+	if len(cfg.SpamKeywords) > 0 || len(cfg.SpamRegexes) > 0 {
+		kw, err := detect.NewKeywordRule("spam", cfg.SpamKeywords, cfg.SpamRegexes, cfg.SpamSeverity)
+		if err != nil {
+			return nil, fmt.Errorf("keyword rule: %w", err)
+		}
+		ds = append(ds, kw)
+	}
+	if len(cfg.BlocklistDomains) > 0 {
+		ds = append(ds, detect.NewBlocklistRule("blocklist", cfg.BlocklistDomains, cfg.BlocklistSeverity))
+	}
+	if cfg.RateThreshold > 0 && cfg.RateWindowMS > 0 {
+		window := time.Duration(cfg.RateWindowMS) * time.Millisecond
+		ds = append(ds, detect.NewRateRule(window, cfg.RateThreshold, cfg.RateMaxDIDs, cfg.RateSeverity))
+	}
+	return ds, nil
 }
