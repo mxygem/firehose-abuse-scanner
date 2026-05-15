@@ -44,6 +44,16 @@ test-v:
 test-one name pkg:
     go test {{ pkg }} -run {{ name }}
 
+# run all unit tests with coverage and open the HTML report in a browser
+test-coverage:
+    go test -coverprofile=coverage.out ./...
+    go tool cover -html=coverage.out -o coverage.html
+    @if command -v wslview >/dev/null 2>&1; then wslview coverage.html; \
+        elif command -v explorer.exe >/dev/null 2>&1; then explorer.exe coverage.html || true; \
+        elif command -v xdg-open >/dev/null 2>&1; then xdg-open coverage.html; \
+        elif command -v open >/dev/null 2>&1; then open coverage.html; \
+        else echo "No opener found; report at $(pwd)/coverage.html"; fi
+
 # run integration tests (requires Scylla running)
 test-integration:
     go test -tags=integration ./internal/storage/scylla/...
