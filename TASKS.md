@@ -68,7 +68,7 @@ Goal: a small but realistic rule set that produces hits the dashboard/CLI can sh
 
 Goal: prove the data is queryable. A full dashboard is out of scope; pick one of the two below.
 
-- [ ] **3.1 CLI subcommand `scanner query`** *(preferred — minimal)*
+- [X] **3.1 CLI subcommand `scanner query`** *(preferred — minimal)*
   - `scanner query did <did>` → recent events for a DID.
   - `scanner query flagged --since 10m` → recent hits.
   - Demonstrates the partition-key choices from 1.2 paying off.

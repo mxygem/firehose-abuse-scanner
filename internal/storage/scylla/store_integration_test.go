@@ -256,5 +256,96 @@ func TestBootstrap_AgainstFreshSession(t *testing.T) {
 	require.NoError(t, bootstrap(ctx, cfg))
 }
 
+func TestRecentEventsByDID_RoundTrip(t *testing.T) {
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+
+	base := time.Now().UTC().Truncate(time.Millisecond)
+	for i := 0; i < 3; i++ {
+		evt := models.FirehoseEvent{
+			ID:         fmt.Sprintf("evt-%d", i),
+			DID:        "did:plc:reader",
+			Kind:       models.EventPost,
+			Text:       fmt.Sprintf("post %d", i),
+			Langs:      []string{"en"},
+			Links:      []string{"https://bsky.app"},
+			CreatedAt:  base.Add(time.Duration(i) * time.Second),
+			ReceivedAt: base.Add(time.Duration(i) * time.Second),
+		}
+		require.NoError(t, s.InsertEvent(ctx, evt))
+	}
+
+	rows, err := s.RecentEventsByDID(ctx, "did:plc:reader", 10)
+	require.NoError(t, err)
+	require.Len(t, rows, 3)
+	// Clustered received_at DESC → newest first.
+	assert.Equal(t, "evt-2", rows[0].ID)
+	assert.Equal(t, "evt-1", rows[1].ID)
+	assert.Equal(t, "evt-0", rows[2].ID)
+	assert.Equal(t, models.EventPost, rows[0].Kind)
+	assert.Equal(t, []string{"en"}, rows[0].Langs)
+}
+
+func TestRecentEventsByDID_LimitRespected(t *testing.T) {
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+
+	base := time.Now().UTC().Truncate(time.Millisecond)
+	for i := 0; i < 5; i++ {
+		require.NoError(t, s.InsertEvent(ctx, models.FirehoseEvent{
+			ID:         fmt.Sprintf("evt-%d", i),
+			DID:        "did:plc:capped",
+			Kind:       models.EventPost,
+			ReceivedAt: base.Add(time.Duration(i) * time.Second),
+		}))
+	}
+	rows, err := s.RecentEventsByDID(ctx, "did:plc:capped", 2)
+	require.NoError(t, err)
+	assert.Len(t, rows, 2)
+}
+
+func TestRecentFlagged_RoundTrip(t *testing.T) {
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	recent := storage.FlaggedRecord{
+		EventID:    "evt-recent",
+		DID:        "did:plc:spammer",
+		Kind:       models.EventPost,
+		Text:       "BUY NOW",
+		ReceivedAt: now.Add(-2 * time.Minute),
+		RuleID:     "spam.keyword",
+		Severity:   "medium",
+		Reason:     "matched",
+		Evidence:   map[string]string{"matches": "BUY NOW"},
+	}
+	old := storage.FlaggedRecord{
+		EventID:    "evt-old",
+		DID:        "did:plc:spammer",
+		Kind:       models.EventPost,
+		Text:       "old hit",
+		ReceivedAt: now.Add(-30 * time.Minute),
+		RuleID:     "spam.keyword",
+		Severity:   "medium",
+		Reason:     "matched",
+		Evidence:   map[string]string{"matches": "old"},
+	}
+	require.NoError(t, s.InsertFlagged(ctx, recent))
+	require.NoError(t, s.InsertFlagged(ctx, old))
+
+	got, err := s.RecentFlagged(ctx, 5*time.Minute, 50)
+	require.NoError(t, err)
+	require.Len(t, got, 1, "only the recent hit falls inside the 5m window")
+	assert.Equal(t, "evt-recent", got[0].EventID)
+	assert.Equal(t, "spam.keyword", got[0].RuleID)
+	assert.Equal(t, "BUY NOW", got[0].Evidence["matches"])
+
+	// Widening the window picks up both.
+	got, err = s.RecentFlagged(ctx, time.Hour, 50)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(got), 2)
+}
+
 // Compile-time sanity: gocql is wired in (used by helpers above).
 var _ = gocql.Consistency(0)

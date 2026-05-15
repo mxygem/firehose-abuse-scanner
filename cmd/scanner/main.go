@@ -21,6 +21,17 @@ import (
 )
 
 func main() {
+	// Subcommand dispatch is intentionally tiny — only `query` peels off
+	// into a separate code path; everything else (including no args) runs
+	// the scanner. This keeps the demo's "go run ./cmd/scanner" UX intact.
+	if len(os.Args) > 1 && os.Args[1] == "query" {
+		if err := runQuery(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
 	})))

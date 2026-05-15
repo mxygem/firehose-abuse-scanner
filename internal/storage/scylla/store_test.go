@@ -29,6 +29,10 @@ func (m *mockCQLSession) QueryContext(_ context.Context, stmt string, args ...in
 	return m.Session.Query(stmt, args...)
 }
 
+func (m *mockCQLSession) IterContext(_ context.Context, stmt string, args ...interface{}) cqlIter {
+	return m.Session.Query(stmt, args...).Iter()
+}
+
 func (m *mockCQLSession) Close() {}
 
 // newMockStore returns a Store wired to a fresh gocqlmock session.
