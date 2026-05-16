@@ -83,11 +83,12 @@ Goal: prove the data is queryable. A full dashboard is out of scope; pick one of
 
 Goal: numbers to point at. This is the headline of the demo.
 
-- [ ] **4.1 Benchmark mode**
+- [X] **4.1 Benchmark mode**
   - `--benchmark` flag: run for N seconds or M events, then exit and print a summary (events received, processed, dropped, p50/p95/p99 handler latency, sustained writes/sec to Scylla).
-  - Histogram via `hdrhistogram-go`.
+  - Two modes: pipeline path (`--benchmark` alone) or direct dispatch (`--benchmark --noop` at 1.9M events/sec).
+  - Histogram via `hdrhistogram-go` (sampled at 1/16).
 
-- [ ] **4.2 Sweep script**
+- [X] **4.2 Sweep script**
   - Bash script that runs the binary across a matrix of `worker_count × batch_size × events_per_second` and writes a CSV.
   - Used to produce a throughput-vs-latency chart for the README.
 
