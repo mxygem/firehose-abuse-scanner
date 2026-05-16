@@ -5,7 +5,10 @@ services:
     container_name: firehose-scylla
     ports:
       - "9042:9042"
-    command: --smp 8 --memory 4G --overprovisioned 1 --developer-mode 1
+    # Tuning: 8G + periodic commitlog + no cache achieves >1M writes/sec.
+    # For pure write benchmarks add: --commitlog-sync periodic
+    #   --commitlog-sync-period-in-ms 1000 --enable-cache 0
+    command: --smp 4 --memory 4G --overprovisioned 1 --developer-mode 1
     volumes:
       - scylla-data:/var/lib/scylla
     healthcheck:

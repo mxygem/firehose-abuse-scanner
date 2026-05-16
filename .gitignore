@@ -12,6 +12,7 @@
 /bin/
 /dist/
 /build/
+/scanner
 
 # Test and coverage output
 *.test
