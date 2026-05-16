@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -17,13 +18,23 @@ import (
 	"github.com/mxygem/firehose-abuse-scanner/internal/detect"
 	"github.com/mxygem/firehose-abuse-scanner/internal/firehose"
 	"github.com/mxygem/firehose-abuse-scanner/internal/pipeline"
+	"github.com/mxygem/firehose-abuse-scanner/internal/storage"
+	"github.com/mxygem/firehose-abuse-scanner/internal/storage/noop"
 	"github.com/mxygem/firehose-abuse-scanner/internal/storage/scylla"
 )
 
 func main() {
-	// Subcommand dispatch is intentionally tiny — only `query` peels off
-	// into a separate code path; everything else (including no args) runs
-	// the scanner. This keeps the demo's "go run ./cmd/scanner" UX intact.
+	benchmark := false
+	useNoop := false
+	for _, a := range os.Args[1:] {
+		if a == "--benchmark" {
+			benchmark = true
+		}
+		if a == "--noop" || a == "--dry-run" {
+			useNoop = true
+		}
+	}
+
 	if len(os.Args) > 1 && os.Args[1] == "query" {
 		if err := runQuery(os.Args[2:]); err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)
@@ -40,6 +51,13 @@ func main() {
 	l.Info("starting firehose abuse scanner")
 
 	cfg := config.MustLoad(os.Getenv("ENV"))
+
+	if benchmark {
+		l.Info("benchmark mode active — overriding config for max throughput",
+			"write_mode", "did_only")
+		cfg.ScyllaWriteMode = "did_only"
+		cfg.MetricsAddr = ""
+	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
@@ -65,7 +83,6 @@ func main() {
 		}()
 	}
 
-	// Swap NewSimulator with a real WebSocket client later.
 	client := firehose.NewSimulator(
 		firehose.WithEventsPerSecond(cfg.EventsPerSecond),
 		firehose.WithBurstMultiplier(cfg.BurstMultiplier),
@@ -75,30 +92,37 @@ func main() {
 	)
 	l.Info("firehose client ready", "source", client.Name())
 
-	store, err := scylla.NewBatched(ctx, scylla.Config{
-		Hosts:       cfg.ScyllaHosts,
-		Keyspace:    cfg.ScyllaKeyspace,
-		Consistency: cfg.ScyllaConsistency,
-		Timeout:     time.Duration(cfg.ScyllaTimeoutMS) * time.Millisecond,
-		NumConns:    cfg.ScyllaNumConns,
-	}, scylla.BatchConfig{
-		MaxSize:        cfg.ScyllaBatchSize,
-		FlushInterval:  time.Duration(cfg.ScyllaBatchFlushMS) * time.Millisecond,
-		FlushWorkers:   cfg.ScyllaBatchFlushWorkers,
-		FlushQueueSize: cfg.ScyllaBatchQueueSize,
-		BufferShards:   cfg.ScyllaBatchShards,
-	})
-	if err != nil {
-		l.Error("creating scylla store", "error", err)
-		os.Exit(1)
+	var store storage.Storer
+	if useNoop {
+		n := noop.New()
+		store = n
+		l.Info("using noop store (no Scylla)")
+	} else {
+		writeMode := scylla.WriteMode(cfg.ScyllaWriteMode)
+		if writeMode != scylla.WriteModeDIDOnly {
+			writeMode = scylla.WriteModeFull
+		}
+		s, err := scylla.NewBatched(ctx, scylla.Config{
+			Hosts:       cfg.ScyllaHosts,
+			Keyspace:    cfg.ScyllaKeyspace,
+			Consistency: cfg.ScyllaConsistency,
+			Timeout:     time.Duration(cfg.ScyllaTimeoutMS) * time.Millisecond,
+			NumConns:    cfg.ScyllaNumConns,
+		}, scylla.BatchConfig{
+			MaxSize:        cfg.ScyllaBatchSize,
+			FlushInterval:  time.Duration(cfg.ScyllaBatchFlushMS) * time.Millisecond,
+			FlushWorkers:   cfg.ScyllaBatchFlushWorkers,
+			FlushQueueSize: cfg.ScyllaBatchQueueSize,
+			BufferShards:   cfg.ScyllaBatchShards,
+			WriteMode:      writeMode,
+		})
+		if err != nil {
+			l.Error("creating scylla store", "error", err)
+			os.Exit(1)
+		}
+		store = s
 	}
 	defer store.Close()
-
-	src, err := client.Subscribe(ctx)
-	if err != nil {
-		l.Error("subscribing to firehose", "error", err)
-		os.Exit(1)
-	}
 
 	detectors, err := buildDetectors(cfg)
 	if err != nil {
@@ -108,17 +132,118 @@ func main() {
 	l.Info("detectors ready", "count", len(detectors))
 
 	scheduler := pipeline.NewParallelScheduler(cfg, pipeline.NewCompositeHandler(store, detectors...))
-	p := pipeline.New(cfg, scheduler)
 
-	runStart := time.Now()
-	runErr := p.Run(ctx, src)
-	elapsed := time.Since(runStart)
-	if runErr != nil && runErr != context.Canceled {
-		l.Error("pipeline exited with error", "error", runErr)
-		os.Exit(1)
+	var runStart time.Time
+	var elapsed time.Duration
+	var snap pipeline.Stats
+
+	if benchmark {
+		runStart = time.Now()
+		runBenchmark(ctx, l, cfg, scheduler)
+		elapsed = time.Since(runStart)
+	} else {
+		src, subErr := client.Subscribe(ctx)
+		if subErr != nil {
+			l.Error("subscribing to firehose", "error", subErr)
+			os.Exit(1)
+		}
+		p := pipeline.New(cfg, scheduler)
+		runStart = time.Now()
+		runErr := p.Run(ctx, src)
+		elapsed = time.Since(runStart)
+		if runErr != nil && runErr != context.Canceled {
+			l.Error("pipeline exited with error", "error", runErr)
+			os.Exit(1)
+		}
+		snap = p.Snapshot()
 	}
 
-	printBenchmarkSummary(p.Snapshot(), scheduler.LatencySnapshot(), store.Stats(), elapsed)
+	var flushedEvents, failedEvents, flushedBatches, failedBatches uint64
+	switch st := store.(type) {
+	case *scylla.BatchStore:
+		s := st.Stats()
+		flushedEvents = s.FlushedEvents
+		failedEvents = s.FailedEvents
+		flushedBatches = s.FlushedBatches
+		failedBatches = s.FailedBatches
+	case *noop.Store:
+		flushedEvents = st.InsertedEvents()
+		flushedBatches = st.InsertedEvents()
+		failedEvents = 0
+		failedBatches = 0
+	}
+	if snap.Processed == 0 {
+		ss := scheduler.Stats()
+		snap = pipeline.Stats{
+			Received:  ss.Processed + ss.Dropped,
+			Processed: ss.Processed,
+			Dropped:   ss.Dropped,
+			Errors:    ss.Errors,
+		}
+	}
+	printBenchmarkSummary(snap, scheduler.LatencySnapshot(), flushedEvents, failedEvents, flushedBatches, failedBatches, elapsed)
+}
+
+func runBenchmark(ctx context.Context, l *slog.Logger, cfg *config.Config, scheduler *pipeline.ParallelScheduler) {
+	runStart := time.Now()
+	scheduler.Start(ctx)
+
+	statsCtx, stopStats := context.WithCancel(ctx)
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-statsCtx.Done():
+				return
+			case <-ticker.C:
+				snap := scheduler.Stats()
+				l.Info("bench progress",
+					"processed", snap.Processed,
+					"dropped", snap.Dropped,
+					"errors", snap.Errors,
+					"elapsed", time.Since(runStart).Round(time.Second))
+			}
+		}
+	}()
+
+	eps := cfg.EventsPerSecond
+	concurrency := cfg.SimulatorConcurrency
+	if concurrency < 1 {
+		concurrency = 1
+	}
+	perRunner := eps / concurrency
+	const tickMS = time.Millisecond
+	perTick := perRunner / 1000
+	if perTick < 1 {
+		perTick = 1
+	}
+	var simWg sync.WaitGroup
+	for i := 0; i < concurrency; i++ {
+		simWg.Add(1)
+		go func() {
+			defer simWg.Done()
+			ticker := time.NewTicker(tickMS)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case t := <-ticker.C:
+					for j := 0; j < perTick; j++ {
+						evt := firehose.GenerateEvent(t)
+						_ = scheduler.AddWork(ctx, evt.DID, evt)
+					}
+				}
+			}
+		}()
+	}
+	simWg.Wait()
+
+	stopStats()
+	shutdownCtx, scancel := context.WithTimeout(context.Background(), 10*time.Second)
+	_ = scheduler.Shutdown(shutdownCtx)
+	scancel()
 }
 
 // printBenchmarkSummary prints a single end-of-run block to stderr that
@@ -126,7 +251,7 @@ func main() {
 // handler-latency percentiles. This is the source of truth for "how fast did
 // it really go" — scanner_events_processed_total is buffered InsertEvent
 // returns, not durable writes.
-func printBenchmarkSummary(p pipeline.Stats, lat pipeline.LatencySummary, b scylla.BatchStats, elapsed time.Duration) {
+func printBenchmarkSummary(p pipeline.Stats, lat pipeline.LatencySummary, flushedEvents, failedEvents, flushedBatches, failedBatches uint64, elapsed time.Duration) {
 	secs := elapsed.Seconds()
 	if secs <= 0 {
 		secs = 1
@@ -135,10 +260,10 @@ func printBenchmarkSummary(p pipeline.Stats, lat pipeline.LatencySummary, b scyl
 	if p.Received > 0 {
 		dropPct = 100 * float64(p.Dropped) / float64(p.Received)
 	}
-	totalAttempted := b.FlushedEvents + b.FailedEvents
+	totalAttempted := flushedEvents + failedEvents
 	failPct := 0.0
 	if totalAttempted > 0 {
-		failPct = 100 * float64(b.FailedEvents) / float64(totalAttempted)
+		failPct = 100 * float64(failedEvents) / float64(totalAttempted)
 	}
 
 	out := os.Stderr
@@ -150,10 +275,10 @@ func printBenchmarkSummary(p pipeline.Stats, lat pipeline.LatencySummary, b scyl
 	fmt.Fprintf(out, "    processed      %d (%.0f/s)\n", p.Processed, float64(p.Processed)/secs)
 	fmt.Fprintf(out, "    dropped        %d (%.1f%%)\n", p.Dropped, dropPct)
 	fmt.Fprintf(out, "    handler errors %d\n", p.Errors)
-	fmt.Fprintln(out, "  scylla writes (truth):")
-	fmt.Fprintf(out, "    flushed events %d (%.0f/s)\n", b.FlushedEvents, float64(b.FlushedEvents)/secs)
-	fmt.Fprintf(out, "    failed events  %d (%.1f%% of attempts)\n", b.FailedEvents, failPct)
-	fmt.Fprintf(out, "    flushed batches %d, failed batches %d\n", b.FlushedBatches, b.FailedBatches)
+	fmt.Fprintln(out, "  writes (truth):")
+	fmt.Fprintf(out, "    flushed events %d (%.0f/s)\n", flushedEvents, float64(flushedEvents)/secs)
+	fmt.Fprintf(out, "    failed events  %d (%.1f%% of attempts)\n", failedEvents, failPct)
+	fmt.Fprintf(out, "    flushed batches %d, failed batches %d\n", flushedBatches, failedBatches)
 	fmt.Fprintln(out, "  handler latency:")
 	fmt.Fprintf(out, "    p50  %s\n", usToDuration(lat.P50))
 	fmt.Fprintf(out, "    p95  %s\n", usToDuration(lat.P95))
