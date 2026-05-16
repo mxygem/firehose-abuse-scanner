@@ -36,6 +36,7 @@ type Config struct {
 	ScyllaBatchFlushWorkers int
 	ScyllaBatchQueueSize    int
 	ScyllaBatchShards       int
+	ScyllaWriteMode         string
 
 	// Detectors
 	SpamKeywords      []string
@@ -104,6 +105,7 @@ func MustLoad(env string) *Config {
 		ScyllaBatchFlushWorkers: k.Int("scylla_batch_flush_workers"),
 		ScyllaBatchQueueSize:    k.Int("scylla_batch_queue_size"),
 		ScyllaBatchShards:       k.Int("scylla_batch_shards"),
+		ScyllaWriteMode:         k.String("scylla_write_mode"),
 		SpamKeywords:            k.Strings("spam_keywords"),
 		SpamRegexes:             k.Strings("spam_regexes"),
 		SpamSeverity:            k.String("spam_severity"),

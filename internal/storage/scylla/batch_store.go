@@ -21,6 +21,17 @@ import (
 // Compile-time check: *BatchStore satisfies storage.Storer.
 var _ storage.Storer = (*BatchStore)(nil)
 
+// WriteMode controls which tables the batched writer targets.
+type WriteMode string
+
+const (
+	// WriteModeFull writes to both events_by_did and events_by_minute.
+	WriteModeFull WriteMode = "full"
+	// WriteModeDIDOnly skips events_by_minute writes, halving the write
+	// load on Scylla at the cost of losing pre-aggregated time buckets.
+	WriteModeDIDOnly WriteMode = "did_only"
+)
+
 // BatchConfig controls buffering behavior for the batched writer.
 type BatchConfig struct {
 	// MaxSize triggers a flush when the buffer reaches this many events.
@@ -38,6 +49,8 @@ type BatchConfig struct {
 	// batches stay partition-coalesced. This is what lets the shard-aware
 	// gocql fork actually route batches to a single Scylla shard.
 	BufferShards int
+	// WriteMode controls which tables are written. Defaults to WriteModeFull.
+	WriteMode WriteMode
 }
 
 // BatchStore buffers InsertEvent calls and flushes them as UNLOGGED BATCHes,
@@ -60,6 +73,7 @@ type BatchStore struct {
 	maxSize       int
 	flushInterval time.Duration
 	flushWorkers  int
+	writeMode     WriteMode
 
 	closeMu sync.RWMutex
 	closed  bool
@@ -91,6 +105,8 @@ type BatchStats struct {
 	FailedEvents   uint64
 	FailedBatches  uint64
 }
+
+
 
 type batchBuffer struct {
 	mu  sync.Mutex
@@ -160,12 +176,18 @@ func NewBatched(ctx context.Context, cfg Config, bcfg BatchConfig) (*BatchStore,
 		}
 	}
 
+	writeMode := bcfg.WriteMode
+	if writeMode == "" {
+		writeMode = WriteModeFull
+	}
+
 	bs := &BatchStore{
 		session:       session,
 		l:             l,
 		maxSize:       maxSize,
 		flushInterval: flushInterval,
 		flushWorkers:  flushWorkers,
+		writeMode:     writeMode,
 		seed:          maphash.MakeSeed(),
 		didShards:     make([]batchBuffer, bufferShards),
 		minuteShards:  make([]batchBuffer, bufferShards),
@@ -203,6 +225,9 @@ func (s *BatchStore) InsertEvent(_ context.Context, e models.FirehoseEvent) erro
 		s.enqueue(batchJob{target: targetByDID, events: events})
 	}
 
+	if s.writeMode == WriteModeDIDOnly {
+		return nil
+	}
 	minuteIdx := s.shardForMinute(e.Kind, e.ReceivedAt.Truncate(time.Minute))
 	if events := s.appendShard(&s.minuteShards[minuteIdx], e); events != nil {
 		s.enqueue(batchJob{target: targetByMinute, events: events})
@@ -354,9 +379,11 @@ func (s *BatchStore) flushAllShards() error {
 			s.enqueue(batchJob{target: targetByDID, events: events})
 		}
 	}
-	for i := range s.minuteShards {
-		if events := s.swapShardBuffer(&s.minuteShards[i]); events != nil {
-			s.enqueue(batchJob{target: targetByMinute, events: events})
+	if s.writeMode != WriteModeDIDOnly {
+		for i := range s.minuteShards {
+			if events := s.swapShardBuffer(&s.minuteShards[i]); events != nil {
+				s.enqueue(batchJob{target: targetByMinute, events: events})
+			}
 		}
 	}
 	return nil
