@@ -26,6 +26,19 @@ run-stress-02:
 run-stress-max:
     ENV=stress-max go run ./cmd/scanner
 
+# run a 60-second benchmark with config.bench.json + --benchmark flag (did_only writes)
+run-bench:
+    ENV=bench go run ./cmd/scanner --benchmark
+
+# run a 60-second full-mode benchmark with config.bench.json (writes both tables)
+run-bench-full:
+    ENV=bench go run ./cmd/scanner
+
+# build + run the sweep matrix (requires Scylla on localhost:9042)
+run-sweep:
+    bash scripts/sweep.sh --build --duration 60s > sweep-results.csv
+    @echo "sweep complete → sweep-results.csv"
+
 # build the scanner binary
 build:
     go build -o ./scanner ./cmd/scanner
