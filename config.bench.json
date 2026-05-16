@@ -1,0 +1,17 @@
+{
+    "worker_count": 200,
+    "channel_buffer": 20000,
+    "events_per_second": 2000000,
+    "backpressure_mode": "drop",
+    "simulator_concurrency": 100,
+    "simulator_duration": "15s",
+    "burst_multiplier": 1.0,
+    "burst_duration": 3600,
+    "scylla_num_conns": 32,
+    "scylla_batch_size": 100,
+    "scylla_batch_flush_ms": 50,
+    "scylla_batch_flush_workers": 16,
+    "scylla_batch_queue_size": 256,
+    "scylla_batch_shards": 64,
+    "scylla_write_mode": "full"
+}
