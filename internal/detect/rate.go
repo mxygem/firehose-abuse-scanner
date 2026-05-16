@@ -4,6 +4,7 @@ import (
 	"container/list"
 	"context"
 	"fmt"
+	"hash/maphash"
 	"strconv"
 	"sync"
 	"time"
@@ -13,18 +14,23 @@ import (
 
 const RuleRateSpike = "rate.spike"
 
-// rateEntry holds the recent event timestamps for a single DID. The slice
-// is kept trimmed to entries within the configured window on every Inspect
-// call so memory stays bounded by (rate × window) per active DID.
+const rateShards = 64
+
 type rateEntry struct {
 	did   string
 	times []time.Time
 }
 
+type rateShard struct {
+	mu    sync.Mutex
+	lru   *list.List
+	index map[string]*list.Element
+}
+
 // RateRule flags DIDs that emit at least `threshold` events within the
-// sliding `window`. State is bounded by `maxDIDs` entries, evicted in LRU
-// order so a long-running scanner cannot accumulate unbounded per-DID
-// state when the firehose is dominated by transient authors.
+// sliding `window`. State is sharded across rateShards independent maps to
+// eliminate mutex contention under high throughput — at 1M events/sec each
+// shard handles ~15K ops/sec.
 type RateRule struct {
 	window    time.Duration
 	threshold int
@@ -32,14 +38,10 @@ type RateRule struct {
 	severity  RuleSeverity
 	now       func() time.Time
 
-	mu    sync.Mutex
-	lru   *list.List
-	index map[string]*list.Element
+	seed   maphash.Seed
+	shards [rateShards]rateShard
 }
 
-// NewRateRule constructs a rule with the given window/threshold. maxDIDs
-// caps in-memory state; non-positive arguments fall back to sane defaults
-// so misconfiguration cannot disable the detector silently.
 func NewRateRule(window time.Duration, threshold, maxDIDs int, severity string) *RateRule {
 	if window <= 0 {
 		window = time.Second
@@ -50,15 +52,21 @@ func NewRateRule(window time.Duration, threshold, maxDIDs int, severity string) 
 	if maxDIDs < 1 {
 		maxDIDs = 1024
 	}
-	return &RateRule{
+	r := &RateRule{
 		window:    window,
 		threshold: threshold,
 		maxDIDs:   maxDIDs,
 		severity:  toSeverity(severity),
 		now:       time.Now,
-		lru:       list.New(),
-		index:     make(map[string]*list.Element, maxDIDs),
+		seed:      maphash.MakeSeed(),
 	}
+	for i := range r.shards {
+		r.shards[i] = rateShard{
+			lru:   list.New(),
+			index: make(map[string]*list.Element, maxDIDs/rateShards+1),
+		}
+	}
+	return r
 }
 
 func (r *RateRule) Inspect(_ context.Context, evt models.FirehoseEvent) []Hit {
@@ -68,8 +76,9 @@ func (r *RateRule) Inspect(_ context.Context, evt models.FirehoseEvent) []Hit {
 	now := r.now()
 	cutoff := now.Add(-r.window)
 
-	r.mu.Lock()
-	entry := r.touch(evt.DID)
+	shard := &r.shards[r.shardFor(evt.DID)]
+	shard.mu.Lock()
+	entry := r.touch(shard, evt.DID)
 
 	drop := 0
 	for drop < len(entry.times) && entry.times[drop].Before(cutoff) {
@@ -80,7 +89,7 @@ func (r *RateRule) Inspect(_ context.Context, evt models.FirehoseEvent) []Hit {
 	}
 	entry.times = append(entry.times, now)
 	count := len(entry.times)
-	r.mu.Unlock()
+	shard.mu.Unlock()
 
 	if count < r.threshold {
 		return nil
@@ -97,20 +106,25 @@ func (r *RateRule) Inspect(_ context.Context, evt models.FirehoseEvent) []Hit {
 	}}
 }
 
-// touch returns the entry for did, creating it if absent and evicting the
-// least-recently-used entry when capacity is exceeded. Caller must hold r.mu.
-func (r *RateRule) touch(did string) *rateEntry {
-	if elem, ok := r.index[did]; ok {
-		r.lru.MoveToFront(elem)
+func (r *RateRule) shardFor(did string) uint64 {
+	var h maphash.Hash
+	h.SetSeed(r.seed)
+	h.WriteString(did)
+	return h.Sum64() % uint64(len(r.shards))
+}
+
+func (r *RateRule) touch(shard *rateShard, did string) *rateEntry {
+	if elem, ok := shard.index[did]; ok {
+		shard.lru.MoveToFront(elem)
 		return elem.Value.(*rateEntry)
 	}
 	entry := &rateEntry{did: did}
-	r.index[did] = r.lru.PushFront(entry)
-	if r.lru.Len() > r.maxDIDs {
-		back := r.lru.Back()
+	shard.index[did] = shard.lru.PushFront(entry)
+	if shard.lru.Len() > r.maxDIDs/rateShards+1 {
+		back := shard.lru.Back()
 		if back != nil {
-			delete(r.index, back.Value.(*rateEntry).did)
-			r.lru.Remove(back)
+			delete(shard.index, back.Value.(*rateEntry).did)
+			shard.lru.Remove(back)
 		}
 	}
 	return entry
