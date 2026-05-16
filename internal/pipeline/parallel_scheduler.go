@@ -11,7 +11,6 @@ import (
 	hdr "github.com/HdrHistogram/hdrhistogram-go"
 
 	"github.com/mxygem/firehose-abuse-scanner/internal/config"
-	"github.com/mxygem/firehose-abuse-scanner/internal/metrics"
 	"github.com/mxygem/firehose-abuse-scanner/internal/models"
 )
 
@@ -139,11 +138,9 @@ func (s *ParallelScheduler) AddWork(ctx context.Context, did string, evt models.
 			return nil
 		default:
 			atomic.AddUint64(&s.stats.Dropped, 1)
-			metrics.EventsDropped.Inc()
 			return ErrDropped
 		}
 	default:
-		// ModeBlock and unset both block on the send.
 		select {
 		case s.workers[idx] <- evt:
 			return nil
@@ -203,23 +200,23 @@ func (s *ParallelScheduler) runWorker(ctx context.Context, idx int) {
 	defer s.wg.Done()
 	l := slog.Default()
 	hist := s.latencies[idx]
+	sampleMask := byte(0x0F) // record 1 in 16 events for histogram (avoids lock contention at 1M+/sec)
+	var tick byte
 	for evt := range s.workers[idx] {
 		start := time.Now()
 		err := s.handler.Handle(ctx, evt)
-		elapsed := time.Since(start)
-		metrics.ProcessingDuration.Observe(elapsed.Seconds())
-		_ = hist.RecordValue(clampLatencyUS(elapsed))
 		if err != nil {
 			if ctx.Err() != nil {
-				// Context canceled at shutdown; stop quietly.
 				return
 			}
 			atomic.AddUint64(&s.stats.Errors, 1)
-			metrics.EventErrors.Inc()
 			l.Warn("handling event", "event_id", evt.ID, "error", err)
 			continue
 		}
 		atomic.AddUint64(&s.stats.Processed, 1)
-		metrics.EventsProcessed.Inc()
+		tick++
+		if tick&sampleMask == 0 {
+			_ = hist.RecordValue(clampLatencyUS(time.Since(start)))
+		}
 	}
 }
