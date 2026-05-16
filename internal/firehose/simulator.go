@@ -18,7 +18,7 @@ const (
 	DefaultSimulatorConcurrency = 1
 	DefaultEventsPerSecond      = 1000
 	DefaultBurstProbability     = 0.3
-	MaxChannelBuffer            = 10000
+	MaxChannelBuffer            = 200000
 
 	// didCardinality controls how many distinct synthetic authors the
 	// simulator generates. Sized to give per-DID-affinity schedulers enough
@@ -113,12 +113,24 @@ func (s *Simulator) Subscribe(ctx context.Context) (<-chan models.FirehoseEvent,
 
 	l.Info("subscribing to firehose", "events_per_second", s.EventsPerSecond, "burst_duration", s.BurstDuration, "burst_multiplier", s.BurstMultiplier, "simulator_concurrency", s.SimulatorConcurrency)
 
+	// Each goroutine runs a 1ms ticker and generates a batch of events per tick.
+	// This avoids the sub-microsecond timer resolution problem that would occur
+	// with per-event tickers at high EPS values.
+	const tickInterval = time.Millisecond
+	basePerTick := s.EventsPerSecond / (1000 * s.SimulatorConcurrency)
+	if basePerTick < 1 {
+		basePerTick = 1
+	}
+	const ticksPerBatch = 10
+	batchInterval := tickInterval * ticksPerBatch
+	batchSize := basePerTick * ticksPerBatch
+
 	var wg sync.WaitGroup
 	for i := 0; i < s.SimulatorConcurrency; i++ {
 		wg.Add(1)
 		go func(runnerID int) {
 			defer wg.Done()
-			ticker := time.NewTicker(time.Second / time.Duration(s.EventsPerSecond))
+			ticker := time.NewTicker(batchInterval)
 			defer ticker.Stop()
 
 			burstDuration := time.Duration(s.BurstDuration) * time.Second
@@ -133,29 +145,27 @@ func (s *Simulator) Subscribe(ctx context.Context) (<-chan models.FirehoseEvent,
 				case <-ctx.Done():
 					return
 				case <-burstTicker.C:
-					// randomly trigger a burst
 					if rand.Float64() < s.BurstProbability {
 						l.Info("triggering burst", "runner", runnerID)
 						inBurst = true
 						burstEnd = time.Now().Add(burstDuration)
 					}
-
 				case t := <-ticker.C:
 					if inBurst && time.Now().After(burstEnd) {
 						l.Info("burst ended", "runner", runnerID)
 						inBurst = false
 					}
 
-					count := 3
+					count := batchSize
 					if inBurst {
-						count = int(s.BurstMultiplier)
+						count = int(float64(batchSize) * s.BurstMultiplier)
 						if count < 1 {
 							count = 1
 						}
 					}
 
 					for j := 0; j < count; j++ {
-						evt := generateEvent(t)
+						evt := GenerateEvent(t)
 						select {
 						case ch <- evt:
 						case <-ctx.Done():
@@ -212,7 +222,7 @@ var (
 
 var counter atomic.Int64
 
-func generateEvent(t time.Time) models.FirehoseEvent {
+func GenerateEvent(t time.Time) models.FirehoseEvent {
 	id := counter.Add(1)
 	kind := eventKinds[rand.IntN(len(eventKinds))]
 
